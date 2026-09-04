@@ -1,0 +1,56 @@
+# OpenSpec configuration — Fitness monorepo
+# Managed by SDD. Do not hand-edit detected sections without re-running sdd-init.
+
+context: |
+  Fitness: mobile-first live fitness challenges with friends.
+  Monorepo: pnpm workspaces + Turborepo + TypeScript strict.
+  apps/mobile: Expo SDK 57, React Native 0.86.3, React 19.2.3,
+    expo-router, reanimated, skia, victory-native, tanstack-query,
+    zustand, socket.io-client, expo-location/task-manager/notifications.
+  apps/api: NestJS 11, TypeORM + pg (PostGIS), Socket.io, better-auth,
+    throttler, class-validator, Vitest (unplugin-swc).
+  Infra: docker-compose postgis/postgis:16-3.4 + redis:7-alpine (healthy).
+
+strict_tdd: true
+
+testing:
+  test_runner:
+    command: "pnpm --filter api test"
+    framework: "Vitest 3 (unplugin-swc, node environment, src/**/*.spec.ts)"
+    note: "apps/mobile has NO test runner configured (no test script)."
+  layers:
+    unit:
+      available: true
+      tool: "Vitest (api)"
+    integration:
+      available: false
+      tool: "supertest installed in api but no integration suite yet"
+    e2e:
+      available: false
+      tool: "—"
+  coverage:
+    available: false
+    command: "—"
+    note: "@vitest/coverage-v8 not installed"
+  quality:
+    linter:
+      available: true
+      command: "pnpm --filter api lint (eslint); biome.json present at root but biome NOT installed"
+    type_checker:
+      available: true
+      command: "pnpm typecheck (turbo) — tsc --noEmit in api and mobile"
+    formatter:
+      available: true
+      command: "pnpm --filter api format (prettier); biome formatter configured but binary missing"
+
+phases:
+  proposal: "openspec/changes/<id>/proposal.md — intent, scope, approach"
+  spec: "openspec/changes/<id>/specs/<capability>/spec.md — requirements + scenarios"
+  design: "openspec/changes/<id>/design.md — technical design"
+  tasks: "openspec/changes/<id>/tasks.md — ordered implementation tasks"
+  apply: "implement tasks; strict_tdd=true → tests first"
+  verify: "run test/typecheck/lint per testing block; prove spec conformance"
+  archive: "sync delta specs into openspec/specs/, move change to changes/archive/"
+
+artifact_store: both
+execution_mode: auto
