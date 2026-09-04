@@ -45,7 +45,14 @@ Total: **20 tareas** con owner marcado (`[Backend]`, `[Mobile]`, `[Shared]`), or
 
 ## 4. La división para 2 personas
 
-### Opción A — Split estricto backend/mobile (recomendada)
+### ✅ Opción elegida: A — Split estricto backend/mobile
+
+**Decisión tomada por el equipo.** Los documentos de trabajo por carril, con cada tarea detallada punto por punto (estilo PDD/TDD), están en:
+
+- **`docs/CUT-1-BACKEND.md`** — carril backend, tareas 2.1 a 2.6
+- **`docs/CUT-1-MOBILE.md`** — carril mobile, tareas 3.1 a 3.3
+
+> Por ahora solo está detallado el **Cut 1** (retos de pasos). Los documentos de Cut 2 y Cut 3 se generan cuando el Cut 1 esté integrado.
 
 **Dev 1 → Backend** (`apps/api`, `packages/contracts` si hace falta ajustar algo)
 
@@ -65,24 +72,8 @@ Total: **20 tareas** con owner marcado (`[Backend]`, `[Mobile]`, `[Shared]`), or
 | Cut 3 | 5.2 – 5.3 | Registro de push + deep-link a invitación, pantallas de historial y stats |
 | Cierre | 6.2 | README/docs de setup actualizados |
 
-✅ **Ventaja**: cada uno aprende su stack a fondo, cero conflictos de archivos, avance en paralelo real.
-⚠️ **Costo**: si uno se traba, el otro no puede destrabarlo fácil sin salir de su stack.
-
-### Opción B — Split mezclado por corte (ambos tocan todo)
-
-Los dos hacen backend Y mobile, pero cada corte completo lo toma uno:
-
-| Dev | Cut 1 | Cut 2 | Cut 3 |
-|---|---|---|---|
-| Dev 1 | Todo (API + mobile) | — | Todo |
-| Dev 2 | — | Todo | — |
-
-✅ **Ventaja**: los dos aprenden el stack completo; hay conocimiento redundante.
-⚠️ **Costo**: no hay paralelismo (los cortes son secuenciales), y el cambio de contexto backend↔mobile frena a cada uno.
-
-### Recomendación
-
-**Opción A.** Los cortes ya hacen que el proyecto avance por hitos; el split backend/mobile es el que permite paralelismo real y menos pisadas. Si uno termina su carril antes, que tome tareas del siguiente corte de su propio carril (ej: el backend que termina Cut 1 puede arrancar el gateway de Cut 2 sin bloquear a nadie).
+✅ **Por qué se eligió**: cada uno aprende su stack a fondo, cero conflictos de archivos, avance en paralelo real. Si uno termina su carril antes, toma tareas del siguiente corte de su propio carril.
+⚠️ **Costo conocido**: si uno se traba, el otro no puede destrabarlo fácil sin salir de su stack — coordinar en la sincronización diaria.
 
 ---
 
