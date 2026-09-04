@@ -1,0 +1,39 @@
+name: fitness
+
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: fitness-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fitness}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitness_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-fitness}
+    ports:
+      - "5432:5432"
+    volumes:
+      - fitness-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitness} -d ${POSTGRES_DB:-fitness}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: fitness-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - fitness-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  fitness-db-data:
+  fitness-redis-data:

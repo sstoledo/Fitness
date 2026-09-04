@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+build/
+
+# Expo
+.expo/
+expo-env.d.ts
+
+# Environment
+.env
+.env.*.local
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Native
+apps/mobile/android/
+apps/mobile/ios/
