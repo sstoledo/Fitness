@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
+import { Platform, Pressable, StyleSheet } from 'react-native';
+import { useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AnimatedIcon } from '@/components/animated-icon';
@@ -9,6 +10,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useAppStore } from '@/store/useAppStore';
 
 const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:4000';
 
@@ -72,10 +74,73 @@ function ApiStatusRow() {
   );
 }
 
+function SessionHeader() {
+  const user = useAppStore((state) => state.user);
+  const signOut = useAppStore((state) => state.signOut);
+  const [signingOut, setSigningOut] = useState(false);
+
+  const handleSignOut = async () => {
+    setSigningOut(true);
+    try {
+      await signOut();
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
+  return (
+    <ThemedView type="backgroundElement" style={styles.sessionRow}>
+      <ThemedText type="smallBold" numberOfLines={1} style={styles.sessionGreeting}>
+        Hey, {user?.name ?? 'Athlete'}
+      </ThemedText>
+      <Pressable
+        accessibilityRole="button"
+        disabled={signingOut}
+        onPress={handleSignOut}
+        style={({ pressed }) => [
+          styles.logoutButton,
+          { borderColor: '#9BA39B', opacity: signingOut || pressed ? 0.6 : 1 },
+        ]}>
+        <ThemedText type="smallBold" themeColor="textSecondary">
+          {signingOut ? 'Signing out…' : 'Log out'}
+        </ThemedText>
+      </Pressable>
+    </ThemedView>
+  );
+}
+
+function OfflineBanner() {
+  const offline = useAppStore((state) => state.offline);
+  const sessionStatus = useAppStore((state) => state.sessionStatus);
+  const validateSession = useAppStore((state) => state.validateSession);
+
+  if (!offline) return null;
+
+  return (
+    <ThemedView type="backgroundSelected" style={styles.offlineBanner}>
+      <ThemedText type="small" style={styles.offlineText}>
+        You are offline — the server is unreachable. Your session is kept; try again in a moment.
+      </ThemedText>
+      <Pressable
+        accessibilityRole="button"
+        disabled={sessionStatus === 'restoring'}
+        onPress={() => void validateSession()}
+        style={({ pressed }) => [styles.retryButton, { opacity: pressed ? 0.7 : 1 }]}>
+        <ThemedText type="smallBold" themeColor="accent">
+          {sessionStatus === 'restoring' ? 'Retrying…' : 'Retry'}
+        </ThemedText>
+      </Pressable>
+    </ThemedView>
+  );
+}
+
 export default function HomeScreen() {
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
+        <SessionHeader />
+        <OfflineBanner />
+
         <ThemedView style={styles.heroSection}>
           <AnimatedIcon />
           <ThemedText type="title" style={styles.title}>
@@ -142,6 +207,38 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     borderRadius: Spacing.two,
+  },
+  sessionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    alignSelf: 'stretch',
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.two,
+    gap: Spacing.two,
+  },
+  sessionGreeting: {
+    flexShrink: 1,
+  },
+  logoutButton: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one + 2,
+  },
+  offlineBanner: {
+    alignSelf: 'stretch',
+    borderRadius: Spacing.two,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    gap: Spacing.two,
+  },
+  offlineText: {
+    color: '#F2F4F0',
+  },
+  retryButton: {
+    alignSelf: 'flex-start',
   },
   stepContainer: {
     gap: Spacing.three,

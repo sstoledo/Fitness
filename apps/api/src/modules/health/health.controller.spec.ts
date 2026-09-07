@@ -4,8 +4,10 @@ import { DataSource } from 'typeorm';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { HealthController } from './health.controller';
 
+const dataSourceQueryMock = vi.fn<DataSource['query']>();
+
 const dataSourceMock = {
-  query: vi.fn(),
+  query: dataSourceQueryMock,
 } as unknown as DataSource;
 
 describe('HealthController', () => {
@@ -22,14 +24,14 @@ describe('HealthController', () => {
   });
 
   it('reports ok when the database responds', async () => {
-    dataSourceMock.query.mockResolvedValue([{ '?column?': 1 }]);
+    dataSourceQueryMock.mockResolvedValue([{ '?column?': 1 }]);
 
     await expect(controller.check()).resolves.toEqual({ status: 'ok', db: 'up' });
-    expect(dataSourceMock.query).toHaveBeenCalledWith('SELECT 1');
+    expect(dataSourceQueryMock).toHaveBeenCalledWith('SELECT 1');
   });
 
   it('throws 503 when the database is unreachable', async () => {
-    dataSourceMock.query.mockRejectedValue(new Error('connection refused'));
+    dataSourceQueryMock.mockRejectedValue(new Error('connection refused'));
 
     await expect(controller.check()).rejects.toBeInstanceOf(ServiceUnavailableException);
   });
