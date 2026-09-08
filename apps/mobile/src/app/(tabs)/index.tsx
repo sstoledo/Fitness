@@ -6,13 +6,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AnimatedIcon } from '@/components/animated-icon';
 import { HintRow } from '@/components/hint-row';
+import { OfflineBanner } from '@/components/offline-banner';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { API_URL } from '@/lib/api';
 import { useAppStore } from '@/store/useAppStore';
-
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:4000';
 
 function getDevMenuHint() {
   if (Platform.OS === 'web') {
@@ -109,37 +109,18 @@ function SessionHeader() {
   );
 }
 
-function OfflineBanner() {
-  const offline = useAppStore((state) => state.offline);
+export default function HomeScreen() {
   const sessionStatus = useAppStore((state) => state.sessionStatus);
   const validateSession = useAppStore((state) => state.validateSession);
 
-  if (!offline) return null;
-
-  return (
-    <ThemedView type="backgroundSelected" style={styles.offlineBanner}>
-      <ThemedText type="small" style={styles.offlineText}>
-        You are offline — the server is unreachable. Your session is kept; try again in a moment.
-      </ThemedText>
-      <Pressable
-        accessibilityRole="button"
-        disabled={sessionStatus === 'restoring'}
-        onPress={() => void validateSession()}
-        style={({ pressed }) => [styles.retryButton, { opacity: pressed ? 0.7 : 1 }]}>
-        <ThemedText type="smallBold" themeColor="accent">
-          {sessionStatus === 'restoring' ? 'Retrying…' : 'Retry'}
-        </ThemedText>
-      </Pressable>
-    </ThemedView>
-  );
-}
-
-export default function HomeScreen() {
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
         <SessionHeader />
-        <OfflineBanner />
+        <OfflineBanner
+          onRetry={() => void validateSession()}
+          retrying={sessionStatus === 'restoring'}
+        />
 
         <ThemedView style={styles.heroSection}>
           <AnimatedIcon />
@@ -226,19 +207,6 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.one + 2,
-  },
-  offlineBanner: {
-    alignSelf: 'stretch',
-    borderRadius: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    gap: Spacing.two,
-  },
-  offlineText: {
-    color: '#F2F4F0',
-  },
-  retryButton: {
-    alignSelf: 'flex-start',
   },
   stepContainer: {
     gap: Spacing.three,
