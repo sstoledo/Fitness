@@ -5,6 +5,7 @@ import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthFormField } from '@/components/auth-form-field';
+import { OfflineBanner } from '@/components/offline-banner';
 import { PrimaryButton } from '@/components/primary-button';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -68,6 +69,9 @@ export default function LoginScreen() {
                 Sign in to keep up with your challenges.
               </ThemedText>
             </View>
+
+            {/* Network-level failures surface here; submitting the form is the retry. */}
+            <OfflineBanner />
 
             <View style={styles.form}>
               <AuthFormField

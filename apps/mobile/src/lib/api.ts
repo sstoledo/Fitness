@@ -3,16 +3,32 @@ import { useAppStore } from '@/store/useAppStore';
 /**
  * Central HTTP client for the Fitness API.
  *
- * Transport decision (Cut 1): bearer token in the Authorization header.
- * Cookies are awkward in React Native (httpOnly cookie jars need extra
- * plumbing and Expo web breaks cookie isolation), so the backend issues an
- * opaque session token and the app attaches it to every request.
+ * Transport decision (Cut 1, confirmed in task #4): bearer token in the
+ * Authorization header. Cookies are awkward in React Native (httpOnly
+ * cookie jars need extra plumbing and Expo web breaks cookie isolation),
+ * so the backend issues an opaque session token and the app attaches it to
+ * every authenticated request as `Authorization: Bearer <token>`.
  *
- * Auth endpoint contract (assumed until task #4 wires the real API):
- * - POST /api/auth/register   → 201 { token, user }
- * - POST /api/auth/login      → 200 { token, user }
- * - POST /api/auth/logout     → 204
- * - GET  /api/auth/session    → 200 { user }
+ * Auth endpoint contract (confirmed in Cut 1 task #4 — the backend MUST
+ * implement exactly this shape when wiring better-auth into NestJS):
+ * - POST /api/auth/register
+ *     → 201 { token, user: { id, email, name } }
+ *     → 400 on invalid email or password < 8 characters
+ *     → 409 on duplicate email (message is shown to the user as-is)
+ * - POST /api/auth/login
+ *     → 200 { token, user: { id, email, name } }
+ *     → 401 { message } generic "invalid credentials" — the message MUST
+ *       be identical for a wrong password and an unknown email so the API
+ *       never reveals which field failed
+ * - POST /api/auth/logout
+ *     → 204 (bearer required; best-effort on the client)
+ * - GET  /api/auth/session
+ *     → 200 { user: { id, email, name } } (bearer required)
+ *     → 401 → the client clears the stored session and returns to login
+ *
+ * register/login are anonymous requests: no Authorization header is sent,
+ * so a 401 on them never clears the local session — it is surfaced to the
+ * user as a form error instead.
  */
 
 export const API_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:4000';
