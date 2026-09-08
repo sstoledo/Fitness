@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import * as Device from 'expo-device';
+import { useRouter } from 'expo-router';
 import { Platform, Pressable, StyleSheet } from 'react-native';
 import { useState } from 'react';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -11,6 +12,7 @@ import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { WebBadge } from '@/components/web-badge';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { useTheme } from '@/hooks/use-theme';
 import { API_URL } from '@/lib/api';
 import { useAppStore } from '@/store/useAppStore';
 
@@ -112,6 +114,8 @@ function SessionHeader() {
 export default function HomeScreen() {
   const sessionStatus = useAppStore((state) => state.sessionStatus);
   const validateSession = useAppStore((state) => state.validateSession);
+  const router = useRouter();
+  const theme = useTheme();
 
   return (
     <ThemedView style={styles.container}>
@@ -130,6 +134,21 @@ export default function HomeScreen() {
         </ThemedView>
 
         <ApiStatusRow />
+
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => router.push('/challenges')}
+          style={({ pressed }) => [
+            styles.challengesCard,
+            { backgroundColor: theme.backgroundElement, opacity: pressed ? 0.85 : 1 },
+          ]}>
+          <ThemedText type="smallBold" themeColor="accent" style={styles.challengesTitle}>
+            My Challenges
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            See your active challenges or create a new one →
+          </ThemedText>
+        </Pressable>
 
         <ThemedText type="code" style={styles.code}>
           get started
@@ -188,6 +207,16 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     borderRadius: Spacing.two,
+  },
+  challengesCard: {
+    alignSelf: 'stretch',
+    gap: Spacing.one,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.three,
+    borderRadius: Spacing.two,
+  },
+  challengesTitle: {
+    fontSize: 16,
   },
   sessionRow: {
     flexDirection: 'row',
