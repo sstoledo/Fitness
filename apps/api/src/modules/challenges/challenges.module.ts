@@ -1,21 +1,66 @@
-import { Module } from '@nestjs/common';
+import { DynamicModule, Module, Type } from '@nestjs/common';
+import { AuthModule } from '../auth/auth.module';
+import { ChallengesAuthGuard } from './challenges-auth.guard';
+import { ChallengesController } from './challenges.controller';
+import { InMemoryChallengesStore } from './challenges.memory.store';
+import { ChallengesService } from './challenges.service';
+import { ChallengesStore } from './challenges.store';
+import { TypeOrmChallengesStore } from './challenges.typeorm.store';
+import { Challenge } from './entities/challenge.entity';
+import { Invite } from './entities/invite.entity';
+import { Membership } from './entities/membership.entity';
+import { UserProfile } from './entities/user-profile.entity';
+import { TypeOrmModule } from '@nestjs/typeorm';
+
+export const CHALLENGE_ENTITIES = [Challenge, Membership, Invite, UserProfile];
+
+export interface ChallengesModuleOptions {
+  /**
+   * 'memory' (default): in-memory store + trust-bearer auth fallback — no
+   * database required. Used by the plain `ChallengesModule` in tests.
+   * 'typeorm': Postgres-backed store + real session validation via
+   * AuthModule. Used by AppModule in production.
+   */
+  persistence?: 'memory' | 'typeorm';
+}
 
 /**
- * RED placeholder for the challenges module (Cut 1, task #7).
+ * Challenges module (Cut 1, task #9 — GREEN).
  *
- * Intentionally empty: the controller, service and entities land in the
- * GREEN task (#9). It exists so the RED contract tests in
- * `challenges.controller.spec.ts` can compile and run against an isolated
- * module without a database — every request currently falls through to the
- * framework's 404 handler, which is exactly the RED state the tests assert.
+ * The plain class is the memory flavour so the RED contract tests keep
+ * compiling `ChallengesModule` alone without Postgres; AppModule opts into
+ * persistence explicitly:
  *
- * Contract the GREEN task must satisfy (from
- * `openspec/changes/fitness-mvp/specs/step-challenges/spec.md`):
- * - POST /api/challenges            → 201 { challenge } (creator is first member)
- * - POST /api/challenges            → 400 when endDate is not after startDate
- * - POST /api/challenges/:id/join   → 200 { challenge } for an invited user
- * - POST /api/challenges/:id/join   → 403 when the user has no invite
- * - POST /api/challenges/:id/join   → 409 "challenge full" at 20 members
+ *     ChallengesModule.forRoot({ persistence: 'typeorm' })
+ *
+ * Entities live here (autoLoadEntities picks them up for migrations) and
+ * the additive migration in `src/migrations/` creates the schema — with
+ * `synchronize: false` always.
  */
-@Module({})
-export class ChallengesModule {}
+@Module({
+  controllers: [ChallengesController],
+  providers: [
+    ChallengesService,
+    ChallengesAuthGuard,
+    { provide: ChallengesStore, useClass: InMemoryChallengesStore },
+  ],
+})
+export class ChallengesModule {
+  static forRoot(options: ChallengesModuleOptions = {}): DynamicModule {
+    const persistence = options.persistence ?? 'memory';
+    if (persistence === 'memory') {
+      return { module: ChallengesModule };
+    }
+
+    return {
+      module: ChallengesModule,
+      imports: [TypeOrmModule.forFeature(CHALLENGE_ENTITIES), AuthModule],
+      providers: [
+        {
+          provide: ChallengesStore,
+          useClass: TypeOrmChallengesStore as Type<ChallengesStore>,
+        },
+      ],
+    };
+  }
+}
