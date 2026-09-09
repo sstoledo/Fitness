@@ -151,6 +151,14 @@ export default function ChallengesScreen() {
         )}
 
         <PrimaryButton label="New challenge" onPress={() => router.push('/challenges/new')} />
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => router.push('/challenges/join')}
+          style={({ pressed }) => [styles.joinLink, { opacity: pressed ? 0.6 : 1 }]}>
+          <ThemedText type="smallBold" themeColor="accent">
+            Join with an invite code
+          </ThemedText>
+        </Pressable>
       </SafeAreaView>
     </ThemedView>
   );
@@ -190,6 +198,10 @@ const styles = StyleSheet.create({
     gap: Spacing.three,
     paddingBottom: Spacing.three,
     flexGrow: 1,
+  },
+  joinLink: {
+    alignItems: 'center',
+    paddingVertical: Spacing.two,
   },
   card: {
     borderRadius: Spacing.three,

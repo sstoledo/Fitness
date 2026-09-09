@@ -16,8 +16,16 @@ import { apiFetch, ApiRequestError } from '@/lib/api';
  * `if (USE_MOCK_CHALLENGES)` branch in this file, plus the env flag.
  *
  * Contract agreed for task #9:
- * - GET  /api/challenges        → 200 { challenges: ChallengeDto[] }
- * - POST /api/challenges        → 201 { challenge: ChallengeDto }
+ * - GET  /api/challenges              → 200 { challenges: ChallengeDto[] }
+ * - POST /api/challenges              → 201 { challenge: ChallengeDto }
+ * - POST /api/challenges/:id/join     → 200 { challenge: ChallengeDto }
+ *     body: { inviteToken: string } (bearer required)
+ *     → 401 without a session token (handled globally by apiFetch)
+ *     → 403 when the user has no invite for this challenge
+ *     → 409 when the challenge already has 20 members
+ *
+ * Deep-link format for the join screen (Cut 1, task #8):
+ * /challenges/join?challengeId=<id>&token=<inviteToken>
  */
 
 const USE_MOCK_CHALLENGES = process.env.EXPO_PUBLIC_USE_CHALLENGE_MOCKS === '1';
@@ -64,6 +72,39 @@ export async function createChallenge(input: CreateChallengeDto): Promise<Challe
     return challenge;
   }
   const data = await apiFetch<ChallengeResponse>('/api/challenges', { method: 'POST', body: input });
+  return parseChallenge(data.challenge);
+}
+
+/**
+ * Joins a challenge with an invite token (Cut 1, task #8). The backend
+ * endpoint lands in task #9; until then the real call fails with 404 and
+ * the join screen surfaces the error state. With
+ * EXPO_PUBLIC_USE_CHALLENGE_MOCKS=1 the join is simulated in memory so the
+ * flow can be exercised in dev:
+ * - any token joins successfully (memberCount increments) unless
+ * - the token is the literal `invalid`, which simulates 403 not invited, or
+ * - the challenge already has 20 members, which simulates 409 full.
+ */
+export async function joinChallenge(challengeId: string, inviteToken: string): Promise<ChallengeDto> {
+  if (USE_MOCK_CHALLENGES) {
+    await delay(400);
+    const challenge = MOCK_CHALLENGES.find((item) => item.id === challengeId);
+    if (!challenge) {
+      throw new ApiRequestError(404, 'Challenge not found.');
+    }
+    if (inviteToken === 'invalid') {
+      throw new ApiRequestError(403, 'You are not invited to this challenge.');
+    }
+    if (challenge.memberCount >= 20) {
+      throw new ApiRequestError(409, 'This challenge is full.');
+    }
+    challenge.memberCount += 1;
+    return challenge;
+  }
+  const data = await apiFetch<ChallengeResponse>(
+    `/api/challenges/${encodeURIComponent(challengeId)}/join`,
+    { method: 'POST', body: { inviteToken } },
+  );
   return parseChallenge(data.challenge);
 }
 
