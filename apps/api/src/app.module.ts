@@ -6,7 +6,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { AuthModule } from './modules/auth/auth.module';
+import { ChallengesModule } from './modules/challenges/challenges.module';
 import { HealthModule } from './modules/health/health.module';
+import { ChallengesSchema1788307200000 } from './migrations/1788307200000-ChallengesSchema';
 
 @Module({
   imports: [
@@ -20,8 +22,10 @@ import { HealthModule } from './modules/health/health.module';
         type: 'postgres',
         url: config.getOrThrow<string>('DATABASE_URL'),
         autoLoadEntities: true,
-        // Migrations come in a later task — never enable synchronize on this base.
+        // Migrations are additive and run on boot — never enable synchronize.
         synchronize: false,
+        migrations: [ChallengesSchema1788307200000],
+        migrationsRun: true,
       }),
     }),
     ThrottlerModule.forRoot([
@@ -32,6 +36,7 @@ import { HealthModule } from './modules/health/health.module';
     ]),
     HealthModule,
     AuthModule,
+    ChallengesModule.forRoot({ persistence: 'typeorm' }),
   ],
   controllers: [AppController],
   providers: [
