@@ -111,7 +111,7 @@ Fitness/
 
 ## Cómo trabajamos (convenciones del equipo)
 
-- **Ruleta par/impar**: Adrián = tareas impares (backend), Amigo = pares (mobile). Orden cronológico estricto en `docs/RUTA-CUT-1.md` — si tu tarea depende de una del otro, frenás y esperás (o ayudás).
+- **Quien elija la tarea**: el equipo es de 3 devs; cualquier dev toma cualquier tarea del orden cronológico en `docs/RUTA-*.md`. No hay carriles fijos ni paridad. Si tu tarea depende de otra que aún no está, frenás y esperás (o ayudás) — pero no saltás de orden.
 - **RED antes que GREEN** (strict TDD en backend): la tarea impar anterior escribe los tests que fallan; la tuya los pone en verde sin tocar las assertions.
 - **1 tarea = 1 commit** conventional en inglés, sin atribución AI, sin emojis.
 - **Idiomas**: docs de coordinación en español; código, comentarios y UI copy en inglés.
@@ -136,7 +136,7 @@ Fitness/
 
 ## Qué leer después
 
-1. `docs/RUTA-CUT-1.md` — el orden cronológico y quién hace qué
+1. `docs/RUTA-CUT-1.md` — el orden cronológico de ejecución
 2. `docs/CUT-1-BACKEND.md` o `docs/CUT-1-MOBILE.md` — según tu carril
 3. `docs/DATABASE.md` — el modelo de datos (3NF)
 4. `openspec/changes/fitness-mvp/proposal.md` — el porqué del producto
