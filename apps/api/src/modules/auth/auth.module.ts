@@ -67,6 +67,10 @@ export class AuthModule {
 
     return {
       module: AuthModule,
+      // The postgres-backed instance is a single app-wide singleton: the
+      // challenges module relies on it (it no longer imports AuthModule) so
+      // bearer sessions validate against the SAME better-auth instance.
+      global: true,
       controllers: [AuthController],
       providers,
       exports: ['BETTER_AUTH'],
