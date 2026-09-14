@@ -6,6 +6,8 @@ import { Invite } from '../modules/challenges/entities/invite.entity';
 import { Membership } from '../modules/challenges/entities/membership.entity';
 import { UserProfile } from '../modules/challenges/entities/user-profile.entity';
 import { ChallengesSchema1788307200000 } from '../migrations/1788307200000-ChallengesSchema';
+import { BetterAuthSchema1788307300000 } from '../migrations/1788307300000-BetterAuthSchema';
+import { BetterAuthAccountIssuer1788307400000 } from '../migrations/1788307400000-BetterAuthAccountIssuer';
 
 config({ path: '.env' });
 
@@ -26,5 +28,9 @@ export default new DataSource({
   type: 'postgres',
   url: process.env.DATABASE_URL,
   entities: [UserProfile, Challenge, Membership, Invite],
-  migrations: [ChallengesSchema1788307200000],
+  migrations: [
+    ChallengesSchema1788307200000,
+    BetterAuthSchema1788307300000,
+    BetterAuthAccountIssuer1788307400000,
+  ],
 });

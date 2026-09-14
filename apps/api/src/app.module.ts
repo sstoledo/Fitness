@@ -9,6 +9,8 @@ import { AuthModule } from './modules/auth/auth.module';
 import { ChallengesModule } from './modules/challenges/challenges.module';
 import { HealthModule } from './modules/health/health.module';
 import { ChallengesSchema1788307200000 } from './migrations/1788307200000-ChallengesSchema';
+import { BetterAuthSchema1788307300000 } from './migrations/1788307300000-BetterAuthSchema';
+import { BetterAuthAccountIssuer1788307400000 } from './migrations/1788307400000-BetterAuthAccountIssuer';
 
 @Module({
   imports: [
@@ -24,7 +26,11 @@ import { ChallengesSchema1788307200000 } from './migrations/1788307200000-Challe
         autoLoadEntities: true,
         // Migrations are additive and run on boot — never enable synchronize.
         synchronize: false,
-        migrations: [ChallengesSchema1788307200000],
+        migrations: [
+          ChallengesSchema1788307200000,
+          BetterAuthSchema1788307300000,
+          BetterAuthAccountIssuer1788307400000,
+        ],
         migrationsRun: true,
       }),
     }),
@@ -35,7 +41,7 @@ import { ChallengesSchema1788307200000 } from './migrations/1788307200000-Challe
       },
     ]),
     HealthModule,
-    AuthModule,
+    AuthModule.forRoot({ storage: 'postgres' }),
     ChallengesModule.forRoot({ persistence: 'typeorm' }),
   ],
   controllers: [AppController],

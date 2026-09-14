@@ -26,13 +26,18 @@ describe('HealthController', () => {
   it('reports ok when the database responds', async () => {
     dataSourceQueryMock.mockResolvedValue([{ '?column?': 1 }]);
 
-    await expect(controller.check()).resolves.toEqual({ status: 'ok', db: 'up' });
+    await expect(controller.check()).resolves.toEqual({
+      status: 'ok',
+      db: 'up',
+    });
     expect(dataSourceQueryMock).toHaveBeenCalledWith('SELECT 1');
   });
 
   it('throws 503 when the database is unreachable', async () => {
     dataSourceQueryMock.mockRejectedValue(new Error('connection refused'));
 
-    await expect(controller.check()).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(controller.check()).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
   });
 });

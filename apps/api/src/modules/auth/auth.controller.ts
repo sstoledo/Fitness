@@ -33,7 +33,8 @@ function toPublicUser(user: AuthSessionUser): PublicUser {
  */
 function mapAuthError(error: unknown): HttpException {
   if (error instanceof APIError) {
-    const body = error.body as { message?: unknown; code?: unknown } | string | undefined;
+    const body = error.body as
+      { message?: unknown; code?: unknown } | string | undefined;
     const message =
       typeof body === 'string'
         ? body
@@ -42,8 +43,16 @@ function mapAuthError(error: unknown): HttpException {
           : error.message;
     // better-auth reports a duplicate email as 422 UNPROCESSABLE_ENTITY; the
     // contract (and the mobile client) expects 409 for a conflicting email.
-    if (typeof body === 'object' && body !== null && typeof body.code === 'string' && body.code.startsWith('USER_ALREADY_EXISTS')) {
-      return new HttpException(message || 'Email already in use', HttpStatus.CONFLICT);
+    if (
+      typeof body === 'object' &&
+      body !== null &&
+      typeof body.code === 'string' &&
+      body.code.startsWith('USER_ALREADY_EXISTS')
+    ) {
+      return new HttpException(
+        message || 'Email already in use',
+        HttpStatus.CONFLICT,
+      );
     }
     const status = Number(error.status);
     if (Number.isInteger(status) && status >= 400 && status < 600) {
@@ -75,7 +84,10 @@ export class AuthController {
         body: { name: dto.name, email: dto.email, password: dto.password },
       });
       if (!token) {
-        throw new HttpException('Failed to create session', HttpStatus.INTERNAL_SERVER_ERROR);
+        throw new HttpException(
+          'Failed to create session',
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
       }
       return { token, user: toPublicUser(user) };
     } catch (error) {
@@ -91,7 +103,10 @@ export class AuthController {
         body: { email: dto.email, password: dto.password },
       });
       if (!token) {
-        throw new HttpException('Failed to create session', HttpStatus.INTERNAL_SERVER_ERROR);
+        throw new HttpException(
+          'Failed to create session',
+          HttpStatus.INTERNAL_SERVER_ERROR,
+        );
       }
       return { token, user: toPublicUser(user) };
     } catch (error) {
@@ -108,7 +123,9 @@ export class AuthController {
   @Post('logout')
   @HttpCode(204)
   @UseGuards(SessionGuard)
-  async logout(@Req() request: { headers: Record<string, string | string[] | undefined> }) {
+  async logout(
+    @Req() request: { headers: Record<string, string | string[] | undefined> },
+  ) {
     const authorization = request.headers.authorization;
     if (typeof authorization === 'string') {
       // Best-effort server-side invalidation: the contract promises a bare

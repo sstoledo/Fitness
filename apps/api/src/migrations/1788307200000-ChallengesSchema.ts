@@ -11,9 +11,8 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  * Deviations from DATABASE.md, documented in the entity files:
  * - `challenge.startDate`/`endDate` are `timestamptz` instead of `date`
  *   because the API contract round-trips full ISO-8601 datetimes.
- * - The `user` table is the domain profile; better-auth still runs on its
- *   memory adapter. Reconciliation with better-auth's own tables is a
- *   separate, later task.
+ * - The `user` table is the numeric domain profile; Better Auth owns the
+ *   separate prefixed auth tables. Reconciliation is a separate issue.
  */
 export class ChallengesSchema1788307200000 implements MigrationInterface {
   name = 'ChallengesSchema1788307200000';

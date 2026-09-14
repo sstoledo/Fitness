@@ -26,7 +26,10 @@ export class SessionGuard implements CanActivate {
   constructor(@Inject('BETTER_AUTH') private readonly auth: Auth) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    const request = context.switchToHttp().getRequest<{ headers: { authorization?: string }; user?: AuthSessionUser }>();
+    const request = context.switchToHttp().getRequest<{
+      headers: { authorization?: string };
+      user?: AuthSessionUser;
+    }>();
     const authorization = request.headers.authorization;
 
     if (typeof authorization !== 'string' || authorization.length === 0) {
@@ -41,7 +44,11 @@ export class SessionGuard implements CanActivate {
       throw new UnauthorizedException();
     }
 
-    request.user = { id: session.user.id, email: session.user.email, name: session.user.name };
+    request.user = {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+    };
     return true;
   }
 }
