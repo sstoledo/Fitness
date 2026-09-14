@@ -29,3 +29,7 @@ pnpm-debug.log*
 # Native
 apps/mobile/android/
 apps/mobile/ios/
+
+AGENTS.md
+
+**/.turbo/

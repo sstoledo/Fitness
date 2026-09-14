@@ -99,6 +99,14 @@ erDiagram
 
 ## Tablas en detalle
 
+### `authUser`, `authSession`, `authAccount`, `authVerification`
+
+Better Auth owns these four PostgreSQL tables for authentication users,
+credential accounts, sessions and verification records. They intentionally use
+an `auth` prefix because the domain `user` table below has numeric ids and is
+reserved for challenge relationships. Better Auth ids remain opaque strings;
+mapping them to domain users is tracked separately in Cut 1 issue 2.
+
 ### `user`
 | Columna | Tipo | Restricciones |
 |---|---|---|
@@ -108,7 +116,8 @@ erDiagram
 | passwordHash | varchar(255) | NOT NULL (gestiona better-auth) |
 | createdAt / updatedAt | timestamptz | NOT NULL, default now() |
 
-> Nota: better-auth puede crear sus propias tablas de sesión (`session`, `account`). Si las usa, esta tabla es el perfil de dominio y se vincula por `email` o por el id que better-auth exponga. Decisión a confirmar en tarea 2.2.
+> Nota: la tabla `user` es el perfil numérico del dominio. No debe reutilizarse
+> como tabla de Better Auth; la reconciliación de identidades queda en el issue 2.
 
 ### `challenge`
 | Columna | Tipo | Restricciones |

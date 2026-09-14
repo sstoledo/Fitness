@@ -3,16 +3,15 @@ import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 /**
  * Domain user profile (Cut 1, task #9).
  *
- * Auth itself is handled by better-auth (currently on its memory adapter,
- * task #5); this table is the domain profile that challenges reference via
+ * Auth itself is handled by better-auth in the separate authUser table; this
+ * table is the domain profile that challenges reference via
  * FK. It is created here — additively, per docs/DATABASE.md — so the
  * challenge/membership/invite foreign keys have a real target.
  *
- * RECONCILIATION NOTE (later Cut 1 task): when better-auth moves to the
- * database, its own `user` table (string ids, auth-managed columns) must be
- * reconciled with this domain profile — either this table absorbs the
- * better-auth id as a text column or a mapping view is introduced. Until
- * then nothing writes rows here; the TypeORM challenges store maps the
+ * RECONCILIATION NOTE (issue 2): better-auth uses opaque string ids while this
+ * profile uses numeric ids. The mapping must be implemented before production
+ * challenge writes can use authenticated users. Until then nothing writes rows
+ * here; the TypeORM challenges store maps the
  * session user id with `Number(userId)` and requires numeric ids.
  */
 @Entity('user')

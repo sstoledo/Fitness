@@ -66,7 +66,11 @@ describe('AuthController (e2e contract)', () => {
     it('creates an account and returns 201 with a session token and user', async () => {
       const response = await request(app)
         .post('/api/auth/register')
-        .send({ name: registered.name, email: registered.email, password: registered.password })
+        .send({
+          name: registered.name,
+          email: registered.email,
+          password: registered.password,
+        })
         .expect(201);
 
       expect(typeof response.body.token).toBe('string');
@@ -82,7 +86,11 @@ describe('AuthController (e2e contract)', () => {
     it('rejects a duplicate email with 409', async () => {
       const response = await request(app)
         .post('/api/auth/register')
-        .send({ name: 'Copy Cat', email: registered.email, password: 'anotherpass1' })
+        .send({
+          name: 'Copy Cat',
+          email: registered.email,
+          password: 'anotherpass1',
+        })
         .expect(409);
 
       expect(typeof response.body.message).toBe('string');
@@ -92,14 +100,22 @@ describe('AuthController (e2e contract)', () => {
     it('rejects a password shorter than 8 characters with 400', async () => {
       await request(app)
         .post('/api/auth/register')
-        .send({ name: 'Weak Pass', email: `weak-${runId}@example.com`, password: 'short1' })
+        .send({
+          name: 'Weak Pass',
+          email: `weak-${runId}@example.com`,
+          password: 'short1',
+        })
         .expect(400);
     });
 
     it('rejects a malformed email with 400', async () => {
       await request(app)
         .post('/api/auth/register')
-        .send({ name: 'Bad Email', email: 'not-an-email', password: 'supersecret1' })
+        .send({
+          name: 'Bad Email',
+          email: 'not-an-email',
+          password: 'supersecret1',
+        })
         .expect(400);
     });
   });

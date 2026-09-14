@@ -107,7 +107,11 @@ describe('ChallengesController (e2e contract)', () => {
       const response = await request(app)
         .post('/api/challenges')
         .set('Authorization', bearer)
-        .send({ ...validCreateBody, name: `Bad Dates ${runId}`, endDate: startDate })
+        .send({
+          ...validCreateBody,
+          name: `Bad Dates ${runId}`,
+          endDate: startDate,
+        })
         .expect(400);
 
       expect(typeof response.body.message).toBe('string');
