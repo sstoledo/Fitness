@@ -1,16 +1,16 @@
 import { DynamicModule, Module, Type } from '@nestjs/common';
-import { AuthModule } from '../auth/auth.module';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChallengesAuthGuard } from './challenges-auth.guard';
 import { ChallengesController } from './challenges.controller';
 import { InMemoryChallengesStore } from './challenges.memory.store';
 import { ChallengesService } from './challenges.service';
 import { ChallengesStore } from './challenges.store';
 import { TypeOrmChallengesStore } from './challenges.typeorm.store';
+import { DomainUserMapper } from './domain-user.mapper';
 import { Challenge } from './entities/challenge.entity';
 import { Invite } from './entities/invite.entity';
 import { Membership } from './entities/membership.entity';
 import { UserProfile } from './entities/user-profile.entity';
-import { TypeOrmModule } from '@nestjs/typeorm';
 
 export const CHALLENGE_ENTITIES = [Challenge, Membership, Invite, UserProfile];
 
@@ -18,8 +18,11 @@ export interface ChallengesModuleOptions {
   /**
    * 'memory' (default): in-memory store + trust-bearer auth fallback — no
    * database required. Used by the plain `ChallengesModule` in tests.
-   * 'typeorm': Postgres-backed store + real session validation via
-   * AuthModule. Used by AppModule in production.
+   * 'typeorm': Postgres-backed store + real session validation. Used by
+   * AppModule in production; the single postgres BETTER_AUTH instance comes
+   * from the global AuthModule.forRoot({ storage: 'postgres' }) (wired in
+   * AppModule, not imported here) and DomainUserMapper reconciles the
+   * session id against the numeric domain `user` table.
    */
   persistence?: 'memory' | 'typeorm';
 }
@@ -54,12 +57,19 @@ export class ChallengesModule {
 
     return {
       module: ChallengesModule,
-      imports: [TypeOrmModule.forFeature(CHALLENGE_ENTITIES), AuthModule],
+      // No AuthModule import here: AuthModule.forRoot({ storage: 'postgres' })
+      // is marked global by AppModule, so the single postgres-backed
+      // BETTER_AUTH provider is visible from this module scope (and the
+      // memory instance of the plain AuthModule class no longer shadows it).
+      imports: [TypeOrmModule.forFeature(CHALLENGE_ENTITIES)],
       providers: [
         {
           provide: ChallengesStore,
           useClass: TypeOrmChallengesStore as Type<ChallengesStore>,
         },
+        // Reconciler between better-auth sessions (string ids) and the
+        // numeric domain `user` table (find-or-create by unique email).
+        DomainUserMapper,
       ],
     };
   }
