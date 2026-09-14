@@ -11,6 +11,7 @@ import { HealthModule } from './modules/health/health.module';
 import { ChallengesSchema1788307200000 } from './migrations/1788307200000-ChallengesSchema';
 import { BetterAuthSchema1788307300000 } from './migrations/1788307300000-BetterAuthSchema';
 import { BetterAuthAccountIssuer1788307400000 } from './migrations/1788307400000-BetterAuthAccountIssuer';
+import { UserProfilePasswordHashNullable1788307500000 } from './migrations/1788307500000-UserProfilePasswordHashNullable';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { BetterAuthAccountIssuer1788307400000 } from './migrations/1788307400000
           ChallengesSchema1788307200000,
           BetterAuthSchema1788307300000,
           BetterAuthAccountIssuer1788307400000,
+          UserProfilePasswordHashNullable1788307500000,
         ],
         migrationsRun: true,
       }),

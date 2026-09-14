@@ -8,6 +8,7 @@ import { UserProfile } from '../modules/challenges/entities/user-profile.entity'
 import { ChallengesSchema1788307200000 } from '../migrations/1788307200000-ChallengesSchema';
 import { BetterAuthSchema1788307300000 } from '../migrations/1788307300000-BetterAuthSchema';
 import { BetterAuthAccountIssuer1788307400000 } from '../migrations/1788307400000-BetterAuthAccountIssuer';
+import { UserProfilePasswordHashNullable1788307500000 } from '../migrations/1788307500000-UserProfilePasswordHashNullable';
 
 config({ path: '.env' });
 
@@ -32,5 +33,6 @@ export default new DataSource({
     ChallengesSchema1788307200000,
     BetterAuthSchema1788307300000,
     BetterAuthAccountIssuer1788307400000,
+    UserProfilePasswordHashNullable1788307500000,
   ],
 });

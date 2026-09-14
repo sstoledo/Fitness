@@ -1,0 +1,233 @@
+import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { Test, TestingModule } from '@nestjs/testing';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { config as loadDotEnv } from 'dotenv';
+import request from 'supertest';
+import { DataSource } from 'typeorm';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { AuthModule } from '../auth/auth.module';
+import { BetterAuthSchema1788307300000 } from '../../migrations/1788307300000-BetterAuthSchema';
+import { BetterAuthAccountIssuer1788307400000 } from '../../migrations/1788307400000-BetterAuthAccountIssuer';
+import { ChallengesSchema1788307200000 } from '../../migrations/1788307200000-ChallengesSchema';
+import { UserProfilePasswordHashNullable1788307500000 } from '../../migrations/1788307500000-UserProfilePasswordHashNullable';
+import { ChallengesModule } from './challenges.module';
+
+// supertest types every response body as `any`; these shadow types keep the
+// flow fully typed so the repo's no-unsafe-* lint rules stay green. The
+// shapes mirror the auth/challenges controller contracts.
+interface RegisterResponseBody {
+  token: string;
+  user: { id: string; email: string; name: string };
+}
+interface ChallengeSummary {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+  startDate: string;
+  endDate: string;
+  createdBy: string;
+  memberCount: number;
+}
+interface ChallengeResponseBody {
+  challenge: ChallengeSummary;
+}
+interface ChallengeListResponseBody {
+  challenges: ChallengeSummary[];
+}
+interface InviteResponseBody {
+  invite: { token: string };
+}
+type SuperResponse<T> = { body: T };
+
+/**
+ * Real end-to-end flow over PostgreSQL: register → create challenge → invite
+ * → join, exercising the exact AppModule wiring
+ * (`AuthModule.forRoot({ storage: 'postgres' })` + `ChallengesModule.forRoot(
+ * { persistence: 'typeorm' })`) — the single global better-auth instance,
+ * the session→domain `DomainUserMapper` reconciliation and the additive
+ * migrations.
+ *
+ * Gated: this describe only runs when `INTEGRATION_DATABASE_URL` is set (the
+ * orchestrator supplies a scratch database). Plain `pnpm --filter api test`
+ * has no such env var, so the whole block is skipped and the default suite
+ * keeps running without Postgres.
+ */
+const runIntegration = !!process.env.INTEGRATION_DATABASE_URL;
+
+describe.skipIf(!runIntegration)(
+  'Challenges + Auth over real PostgreSQL',
+  () => {
+    let moduleRef: TestingModule;
+    let nestApp: INestApplication<import('http').Server>;
+    let httpServer: import('http').Server;
+    let originalDatabaseUrl: string | undefined;
+
+    // Unique per run so repeated executions never collide on emails.
+    const runId = Date.now().toString(36);
+    const password = 'integration-pass-1';
+    const challengePayload = {
+      name: `Integration Step Challenge ${runId}`,
+      type: 'step',
+      startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+      endDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    beforeAll(async () => {
+      // Mirror production env loading (apps/api/.env), with the scratch test
+      // database overriding the dev DATABASE_URL.
+      originalDatabaseUrl = process.env.DATABASE_URL;
+      loadDotEnv({ path: '.env' });
+      process.env.DATABASE_URL = process.env.INTEGRATION_DATABASE_URL!;
+      if (
+        !process.env.BETTER_AUTH_SECRET ||
+        process.env.BETTER_AUTH_SECRET.length < 32
+      ) {
+        process.env.BETTER_AUTH_SECRET =
+          'integration-secret-at-least-32-characters-long';
+      }
+
+      moduleRef = await Test.createTestingModule({
+        imports: [
+          ConfigModule.forRoot({ isGlobal: true }),
+          TypeOrmModule.forRootAsync({
+            inject: [ConfigService],
+            useFactory: (config: ConfigService) => ({
+              type: 'postgres',
+              url: config.getOrThrow<string>('DATABASE_URL'),
+              autoLoadEntities: true,
+              synchronize: false,
+              migrationsRun: true,
+              migrations: [
+                ChallengesSchema1788307200000,
+                BetterAuthSchema1788307300000,
+                BetterAuthAccountIssuer1788307400000,
+                UserProfilePasswordHashNullable1788307500000,
+              ],
+            }),
+          }),
+          AuthModule.forRoot({ storage: 'postgres' }),
+          ChallengesModule.forRoot({ persistence: 'typeorm' }),
+        ],
+      }).compile();
+
+      // Mirror the global setup from main.ts so request paths and payload
+      // validation match production.
+      nestApp = moduleRef.createNestApplication();
+      nestApp.setGlobalPrefix('api');
+      nestApp.useGlobalPipes(
+        new ValidationPipe({
+          whitelist: true,
+          transform: true,
+          forbidNonWhitelisted: true,
+        }),
+      );
+      await nestApp.init();
+      httpServer = nestApp.getHttpServer();
+    });
+
+    afterAll(async () => {
+      try {
+        // Truncate BEFORE closing so the pool can still run the query; the
+        // scratch database stays reusable for the next run.
+        const dataSource = moduleRef.get<DataSource>(DataSource);
+        await dataSource.query(
+          `TRUNCATE TABLE "user", "challenge", "membership", "invite", "authUser", "authSession", "authAccount", "authVerification" RESTART IDENTITY CASCADE`,
+        );
+      } catch {
+        // A failed flow must not block teardown — the truncate is best-effort.
+      } finally {
+        // nestApp.close() triggers AuthPoolLifecycle shutdown (pool.end()).
+        // Guarded so a beforeAll failure (e.g. unreachable database) still
+        // restores the environment instead of masking the original error.
+        try {
+          await nestApp?.close();
+        } catch {
+          // Nothing was initialised — closing is a no-op.
+        }
+        if (originalDatabaseUrl === undefined) {
+          delete process.env.DATABASE_URL;
+        } else {
+          process.env.DATABASE_URL = originalDatabaseUrl;
+        }
+      }
+    });
+
+    it('registers, creates a challenge, invites a second user and both list it', async () => {
+      // 1. Owner registers (better-auth creates the session + token).
+      const ownerEmail = `integration-owner-${runId}@example.com`;
+      const owner = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Owner', email: ownerEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      expect(owner.body.token.length).toBeGreaterThan(0);
+      const ownerToken = owner.body.token;
+
+      // 2. Owner creates a challenge; createdBy must be a numeric domain id
+      //    (proves the DomainUserMapper reconciliation ran, not a raw uuid).
+      const created = (await request(httpServer)
+        .post('/api/challenges')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send(challengePayload)
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      expect(created.body.challenge).toMatchObject({
+        name: challengePayload.name,
+        type: 'step',
+      });
+      const challengeId = created.body.challenge.id;
+      const createdBy = created.body.challenge.createdBy;
+      expect(Number.isInteger(Number(createdBy))).toBe(true);
+      expect(Number(createdBy)).toBeGreaterThan(0);
+      expect(created.body.challenge.memberCount).toBe(1);
+
+      // 3. Owner's list includes the new challenge.
+      const ownerList = (await request(httpServer)
+        .get('/api/challenges')
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .expect(200)) as unknown as SuperResponse<ChallengeListResponseBody>;
+      expect(ownerList.body.challenges).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: challengeId })]),
+      );
+
+      // 4. Second user registers.
+      const inviteeEmail = `integration-invitee-${runId}@example.com`;
+      const invitee = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Invitee', email: inviteeEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      expect(invitee.body.token.length).toBeGreaterThan(0);
+      const inviteeToken = invitee.body.token;
+
+      // 5. Owner invites the second user by email.
+      const invite = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/invites`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ inviteeEmail })
+        .expect(201)) as unknown as SuperResponse<InviteResponseBody>;
+      expect(invite.body.invite.token.length).toBeGreaterThan(0);
+      const inviteToken = invite.body.invite.token;
+
+      // 6. Invitee joins with the token and sees the challenge in their list.
+      const joined = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/join`)
+        .set('Authorization', `Bearer ${inviteeToken}`)
+        .send({ inviteToken })
+        .expect(200)) as unknown as SuperResponse<ChallengeResponseBody>;
+      expect(joined.body.challenge).toMatchObject({
+        id: challengeId,
+        memberCount: 2,
+      });
+
+      const inviteeList = (await request(httpServer)
+        .get('/api/challenges')
+        .set('Authorization', `Bearer ${inviteeToken}`)
+        .expect(200)) as unknown as SuperResponse<ChallengeListResponseBody>;
+      expect(inviteeList.body.challenges).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: challengeId, memberCount: 2 }),
+        ]),
+      );
+    });
+  },
+);
