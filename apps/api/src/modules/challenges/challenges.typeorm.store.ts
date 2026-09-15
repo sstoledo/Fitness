@@ -1,6 +1,10 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import {
   ChallengesStore,
   MAX_CHALLENGE_MEMBERS,
@@ -9,10 +13,12 @@ import {
   type CreateInviteInput,
   type InviteRecord,
   type JoinChallengeResult,
+  type StepSyncEntryInput,
 } from './challenges.store';
 import { Challenge } from './entities/challenge.entity';
 import { Invite } from './entities/invite.entity';
 import { Membership } from './entities/membership.entity';
+import { StepEntry } from '../steps/entities/step-entry.entity';
 import { generateInviteToken } from './invite-token';
 
 const INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -39,6 +45,8 @@ export class TypeOrmChallengesStore extends ChallengesStore {
     @InjectRepository(Membership)
     private readonly memberships: Repository<Membership>,
     @InjectRepository(Invite) private readonly invites: Repository<Invite>,
+    @InjectRepository(StepEntry)
+    private readonly stepEntries: Repository<StepEntry>,
   ) {
     super();
   }
@@ -165,6 +173,55 @@ export class TypeOrmChallengesStore extends ChallengesStore {
         };
       },
     );
+  }
+
+  async syncSteps(
+    userId: string,
+    challengeId: string,
+    entries: StepSyncEntryInput[],
+  ): Promise<{ entries: { date: string; steps: number }[] }> {
+    const numericUserId = this.toNumericId(userId);
+    const numericChallengeId = this.toNumericId(challengeId);
+
+    const membership = await this.memberships.findOneBy({
+      challengeId: numericChallengeId,
+      userId: numericUserId,
+    });
+    if (!membership) {
+      throw new ForbiddenException(
+        'Only members can sync steps to a challenge.',
+      );
+    }
+
+    // Idempotency is guaranteed by the stepEntry_user_challenge_date_uq
+    // unique constraint: PostgreSQL ON CONFLICT (userId, challengeId, date)
+    // DO UPDATE — repeated syncs never create duplicates (docs 2.5/2.6).
+    await this.stepEntries.upsert(
+      entries.map((entry) => ({
+        userId: numericUserId,
+        challengeId: numericChallengeId,
+        date: entry.date,
+        steps: entry.steps,
+      })),
+      ['userId', 'challengeId', 'date'],
+    );
+
+    // Read back the stored rows and echo them in input order. The date
+    // column comes back as the same YYYY-MM-DD string from Postgres.
+    const rows = await this.stepEntries.find({
+      where: {
+        userId: numericUserId,
+        challengeId: numericChallengeId,
+        date: In(entries.map((entry) => entry.date)),
+      },
+    });
+    const stepsByDate = new Map(rows.map((row) => [row.date, row.steps]));
+    return {
+      entries: entries.map((entry) => ({
+        date: entry.date,
+        steps: stepsByDate.get(entry.date) ?? entry.steps,
+      })),
+    };
   }
 
   private async memberCounts(

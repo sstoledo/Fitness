@@ -1,16 +1,18 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
-import { TypeOrmModule } from '@nestjs/typeorm';
+import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
 import { config as loadDotEnv } from 'dotenv';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AuthModule } from '../auth/auth.module';
 import { BetterAuthSchema1788307300000 } from '../../migrations/1788307300000-BetterAuthSchema';
 import { BetterAuthAccountIssuer1788307400000 } from '../../migrations/1788307400000-BetterAuthAccountIssuer';
 import { ChallengesSchema1788307200000 } from '../../migrations/1788307200000-ChallengesSchema';
 import { UserProfilePasswordHashNullable1788307500000 } from '../../migrations/1788307500000-UserProfilePasswordHashNullable';
+import { StepEntrySchema1788307600000 } from '../../migrations/1788307600000-StepEntrySchema';
+import { StepEntry } from '../steps/entities/step-entry.entity';
 import { ChallengesModule } from './challenges.module';
 
 // supertest types every response body as `any`; these shadow types keep the
@@ -38,6 +40,12 @@ interface ChallengeListResponseBody {
 }
 interface InviteResponseBody {
   invite: { token: string };
+}
+interface StepSyncResponseBody {
+  entries: { date: string; steps: number }[];
+}
+interface ErrorMessageBody {
+  message: string | string[];
 }
 type SuperResponse<T> = { body: T };
 
@@ -104,6 +112,7 @@ describe.skipIf(!runIntegration)(
                 BetterAuthSchema1788307300000,
                 BetterAuthAccountIssuer1788307400000,
                 UserProfilePasswordHashNullable1788307500000,
+                StepEntrySchema1788307600000,
               ],
             }),
           }),
@@ -228,6 +237,99 @@ describe.skipIf(!runIntegration)(
           expect.objectContaining({ id: challengeId, memberCount: 2 }),
         ]),
       );
+    });
+
+    it('syncs steps idempotently: one row per (user, challenge, date), non-member rejected', async () => {
+      // 1. Register the member (Alice) and the non-member (Bob).
+      const aliceEmail = `integration-steps-alice-${runId}@example.com`;
+      const alice = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Steps Alice', email: aliceEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      expect(alice.body.token.length).toBeGreaterThan(0);
+      const aliceToken = alice.body.token;
+
+      const bobEmail = `integration-steps-bob-${runId}@example.com`;
+      const bob = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Steps Bob', email: bobEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      expect(bob.body.token.length).toBeGreaterThan(0);
+      const bobToken = bob.body.token;
+
+      // 2. Alice creates a challenge — as owner she is already a member,
+      //    and `createdBy` proves the DomainUserMapper numeric reconciliation.
+      const created = (await request(httpServer)
+        .post('/api/challenges')
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({
+          name: `Integration Steps Challenge ${runId}`,
+          type: 'step',
+          startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          endDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      const challengeId = created.body.challenge.id;
+      const aliceDomainId = Number(created.body.challenge.createdBy);
+      expect(Number.isInteger(aliceDomainId)).toBe(true);
+      expect(aliceDomainId).toBeGreaterThan(0);
+
+      const stepEntries = moduleRef.get<Repository<StepEntry>>(
+        getRepositoryToken(StepEntry),
+      );
+      const syncDate = '2026-09-10';
+      const countRows = async () =>
+        stepEntries.findBy({
+          userId: aliceDomainId,
+          challengeId: Number(challengeId),
+          date: syncDate,
+        });
+
+      // 3. Bob is not a member → 403 before any write happens.
+      const forbidden = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${bobToken}`)
+        .send({ entries: [{ date: syncDate, steps: 999 }] })
+        .expect(403)) as unknown as SuperResponse<ErrorMessageBody>;
+      expect(forbidden.body.message).toMatch(/member/i);
+
+      // 4. Alice syncs; the response echoes the stored values.
+      const synced = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ entries: [{ date: syncDate, steps: 5000 }] })
+        .expect(200)) as unknown as SuperResponse<StepSyncResponseBody>;
+      expect(synced.body).toEqual({
+        entries: [{ date: syncDate, steps: 5000 }],
+      });
+      let rows = await countRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].steps).toBe(5000);
+
+      // 5. Repeating the EXACT same payload: still 200, still ONE row,
+      //    stored value unchanged (constraint-guaranteed idempotency).
+      const repeated = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ entries: [{ date: syncDate, steps: 5000 }] })
+        .expect(200)) as unknown as SuperResponse<StepSyncResponseBody>;
+      expect(repeated.body).toEqual(synced.body);
+      rows = await countRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].steps).toBe(5000);
+
+      // 6. Different value for the same date: upsert updates the single row.
+      const updated = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ entries: [{ date: syncDate, steps: 7000 }] })
+        .expect(200)) as unknown as SuperResponse<StepSyncResponseBody>;
+      expect(updated.body).toEqual({
+        entries: [{ date: syncDate, steps: 7000 }],
+      });
+      rows = await countRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0].steps).toBe(7000);
     });
   },
 );
