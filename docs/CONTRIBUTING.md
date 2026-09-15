@@ -12,6 +12,17 @@
 3. **RED antes de GREEN** (strict TDD en backend): primero se escriben los tests que fallan (RED); la tarea siguiente los pone en verde **sin tocar las assertions**. Los tests RED son el contrato.
 4. **Una branch por unidad de trabajo** → PR a `main` → merge → **borrar la branch mergeada** (local y remota). Las branches mergeadas son solo punteros; los commits ya viven en main.
 5. **PRs chicos y revisables**: guía de ≤ ~400 líneas por unidad. Si se pasa, se divide en PRs encadenados o se aprueba explícitamente como excepción.
+6. **Rebase contra main después de cada merge**: cuando alguien mergea a `main`, el que tenga un PR abierto sincroniza su rama ANTES de seguir trabajando o pedir review:
+
+   ```bash
+   git fetch origin main
+   git rebase origin/main
+   git push --force-with-lease
+   ```
+
+   - **Nunca** `--force` pelado: `--force-with-lease` falla si alguien más ya pusheó a esa rama (protege el trabajo ajeno).
+   - Alternativa sin reescribir historia: el botón **"Update branch"** de GitHub (mergea `main` en tu rama). Imposible de romper, pero la historia queda con commits de merge.
+   - Regla de oro: PR corto + rebase rápido = el merge de otro casi nunca te rompe nada. El dolor aparece cuando el PR vive semanas contra una base que se mueve, no por el rebase en sí.
 
 ## Commits
 
