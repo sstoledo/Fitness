@@ -5,7 +5,7 @@ import {
   Injectable,
 } from '@nestjs/common';
 import type { AuthSessionUser } from '../auth/session.guard';
-import { ChallengesStore } from './challenges.store';
+import { ChallengesStore, type StepSyncEntryInput } from './challenges.store';
 
 /**
  * Wire shape of `ChallengeDto` from `@fitness/contracts`. The api does not
@@ -100,6 +100,19 @@ export class ChallengesService {
       throw new ForbiddenException('You are not invited to this challenge.');
     }
     return this.toDto(result.challenge);
+  }
+
+  /**
+   * Idempotent daily step sync (docs CUT-1-BACKEND.md 2.5/2.6) — thin
+   * passthrough to the store, which owns the membership check (403) and the
+   * constraint-guaranteed upsert.
+   */
+  async syncSteps(
+    userId: string,
+    challengeId: string,
+    entries: StepSyncEntryInput[],
+  ): Promise<{ entries: { date: string; steps: number }[] }> {
+    return this.store.syncSteps(userId, challengeId, entries);
   }
 
   private toDto(record: {
