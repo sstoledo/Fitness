@@ -12,6 +12,8 @@ import { ChallengesSchema1788307200000 } from './migrations/1788307200000-Challe
 import { BetterAuthSchema1788307300000 } from './migrations/1788307300000-BetterAuthSchema';
 import { BetterAuthAccountIssuer1788307400000 } from './migrations/1788307400000-BetterAuthAccountIssuer';
 import { UserProfilePasswordHashNullable1788307500000 } from './migrations/1788307500000-UserProfilePasswordHashNullable';
+import { StepEntrySchema1788307600000 } from './migrations/1788307600000-StepEntrySchema';
+import { StepEntry } from './modules/steps/entities/step-entry.entity';
 
 @Module({
   imports: [
@@ -24,6 +26,7 @@ import { UserProfilePasswordHashNullable1788307500000 } from './migrations/17883
       useFactory: (config: ConfigService) => ({
         type: 'postgres',
         url: config.getOrThrow<string>('DATABASE_URL'),
+        entities: [StepEntry],
         autoLoadEntities: true,
         // Migrations are additive and run on boot — never enable synchronize.
         synchronize: false,
@@ -32,6 +35,7 @@ import { UserProfilePasswordHashNullable1788307500000 } from './migrations/17883
           BetterAuthSchema1788307300000,
           BetterAuthAccountIssuer1788307400000,
           UserProfilePasswordHashNullable1788307500000,
+          StepEntrySchema1788307600000,
         ],
         migrationsRun: true,
       }),
