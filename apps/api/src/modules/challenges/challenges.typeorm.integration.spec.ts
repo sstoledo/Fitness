@@ -645,8 +645,11 @@ describe.skipIf(!runIntegration)(
         .send({ inviteToken: invite.body.invite.token })
         .expect(200);
 
-      // 2. Both sync steps for the same date — Bob ahead of Alice.
-      const syncDate = '2026-09-17';
+      // 2. Both sync steps for the same date — Bob ahead of Alice. The date is
+      //    derived from the run (the same YYYY-MM-DD derivation the service
+      //    uses for its default day) so the probe never goes stale as real
+      //    time moves past a hardcoded literal.
+      const syncDate = new Date().toISOString().slice(0, 10);
       await request(httpServer)
         .post(`/api/challenges/${challengeId}/steps`)
         .set('Authorization', `Bearer ${aliceToken}`)
@@ -689,8 +692,13 @@ describe.skipIf(!runIntegration)(
         expect(ttl).toBeLessThanOrEqual(172800);
       }
 
-      // 4. Mutate the DB behind the cache's back: the next GET must still
-      //    return the CACHED value (proves the second read was a cache hit).
+      // 4. Mutate the DB behind the cache's back. With Redis reachable, the
+      //    next GET must still return the CACHED value (proves the second
+      //    read was a cache hit). The stale-read probe is gated on Redis for
+      //    the same reason every other cache probe is: when Redis is down
+      //    the app correctly falls through to the DB on every GET, so the
+      //    probe would fail by design — the step-5 rehydration probe already
+      //    proves the DB stays the source of truth when it runs.
       const stepEntries = moduleRef.get<Repository<StepEntry>>(
         getRepositoryToken(StepEntry),
       );
@@ -702,12 +710,14 @@ describe.skipIf(!runIntegration)(
         },
         { steps: 12000 },
       );
-      const cachedRead = await getLeaderboard();
-      expect(
-        cachedRead.body.find(
-          (entry) => entry.name === 'Integration Cache Alice',
-        ),
-      ).toMatchObject({ steps: 4000, rank: 2 });
+      if (redisAvailable && testRedis) {
+        const cachedRead = await getLeaderboard();
+        expect(
+          cachedRead.body.find(
+            (entry) => entry.name === 'Integration Cache Alice',
+          ),
+        ).toMatchObject({ steps: 4000, rank: 2 });
+      }
 
       if (redisAvailable && testRedis) {
         // 5. Evict the keys: the next GET rehydrates from the DB (Alice's

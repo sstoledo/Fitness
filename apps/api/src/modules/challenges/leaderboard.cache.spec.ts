@@ -10,10 +10,10 @@ import type { LeaderboardRow } from './leaderboard.ranking';
 
 /**
  * Hand-rolled in-memory fake of the slice of ioredis the cache uses
- * (zadd/zrevrange/hgetall/hset/hexists/expire/exists/del + pipeline). No new
- * dev dependency — the fake keeps the unit suite hermetic and proves the
- * exact Redis semantics the cache relies on (WITHSCORES interleave, EXISTS
- * gating, TTL bookkeeping).
+ * (zadd/zrevrange/hgetall/hset/hexists/expire/exists/del/scan + pipeline).
+ * No new dev dependency — the fake keeps the unit suite hermetic and proves
+ * the exact Redis semantics the cache relies on (WITHSCORES interleave,
+ * EXISTS gating, SCAN glob matches, TTL bookkeeping).
  */
 class FakeRedis {
   readonly zsets = new Map<string, Map<string, number>>();
@@ -104,6 +104,31 @@ class FakeRedis {
     return removed;
   }
 
+  /**
+   * Single-page SCAN: the fake holds few keys, so one page reports every key
+   * matching the pattern and closes the cursor ('0') — the cache's cursor
+   * loop handles that identically to a multi-page real scan. COUNT is
+   * accepted but ignored, matching real SCAN's "hint, not a guarantee".
+   */
+  async scan(
+    cursor: number | string,
+    match?: 'MATCH',
+    pattern?: string,
+    count?: 'COUNT',
+    limit?: number | string,
+  ): Promise<[string, string[]]> {
+    void cursor;
+    void match;
+    void count;
+    void limit;
+    if (pattern === undefined) return ['0', []];
+    const regex = new RegExp(
+      `^${pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`,
+    );
+    const keys = new Set<string>([...this.zsets.keys(), ...this.hashes.keys()]);
+    return ['0', [...keys].filter((key) => regex.test(key))];
+  }
+
   pipeline(): FakePipeline {
     return new FakePipeline(this);
   }
@@ -172,8 +197,8 @@ describe('LeaderboardCache', () => {
     ]);
 
     expect(await cache.get(CHALLENGE, DATE)).toEqual([
-      { userId: 'u2', name: 'Bob', steps: 9000, rank: 1 },
-      { userId: 'u1', name: 'Alice', steps: 4000, rank: 2 },
+      { userId: 'u2', name: 'Bob', steps: 9000, rank: 1, isRequester: false },
+      { userId: 'u1', name: 'Alice', steps: 4000, rank: 2, isRequester: false },
     ]);
     expect(fake.ttls.get(zkey)).toBe(LEADERBOARD_TTL_SECONDS);
     expect(fake.ttls.get(mkey)).toBe(LEADERBOARD_TTL_SECONDS);
@@ -199,6 +224,29 @@ describe('LeaderboardCache', () => {
       'u-late',
     ]);
     expect(result?.map((entry) => entry.rank)).toEqual([1, 2, 2]);
+  });
+
+  it('marks the requester entry when get() is given a requesterUserId', async () => {
+    const fake = new FakeRedis();
+    const cache = cacheWith(fake);
+    await cache.set(CHALLENGE, DATE, [
+      ...rows({ userId: 'u1', name: 'Alice', steps: 4000, joinedAt: 100 }),
+      ...rows({ userId: 'u2', name: 'Bob', steps: 9000, joinedAt: 200 }),
+    ]);
+
+    // Cache hits must carry the PR-A requester contract just like the DB
+    // path — a null requester would flip every entry to isRequester: false.
+    const result = await cache.get(CHALLENGE, DATE, 'u1');
+    expect(result?.find((entry) => entry.userId === 'u1')).toMatchObject({
+      isRequester: true,
+    });
+    expect(result?.find((entry) => entry.userId === 'u2')).toMatchObject({
+      isRequester: false,
+    });
+
+    // Without a requester the marking stays false for everyone.
+    const unmarked = await cache.get(CHALLENGE, DATE);
+    expect(unmarked?.every((entry) => !entry.isRequester)).toBe(true);
   });
 
   it('treats a member missing from the meta hash as a miss (null)', async () => {
@@ -278,5 +326,58 @@ describe('LeaderboardCache', () => {
     await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
     await cache.set(CHALLENGE, DATE, []);
     expect(await fake.exists(zkey, mkey)).toBe(0);
+  });
+
+  it('invalidateChallenge removes every lb and lb:meta key for the challenge', async () => {
+    const fake = new FakeRedis();
+    const cache = cacheWith(fake);
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
+    await cache.set(CHALLENGE, '2026-09-15', rows({ userId: 'u1', steps: 50 }));
+
+    await cache.invalidateChallenge(CHALLENGE);
+
+    // Both key families and BOTH dates are gone — a member who joins after
+    // hydration must not linger in any cached day of the challenge.
+    expect(await fake.exists(zkey, mkey)).toBe(0);
+    expect(await fake.exists('lb:7:2026-09-15', 'lb:meta:7:2026-09-15')).toBe(
+      0,
+    );
+  });
+
+  it('invalidateChallenge leaves sibling challenges and unrelated keys intact', async () => {
+    const fake = new FakeRedis();
+    const cache = cacheWith(fake);
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
+    // Challenge 71 shares the 7 prefix — SCAN globs must NOT over-match it.
+    await cache.set(71, DATE, rows({ userId: 'u2', steps: 200 }));
+    await cache.set(99, DATE, rows({ userId: 'u3', steps: 300 }));
+    fake.hashes.set('app:settings', new Map([['theme', 'dark']]));
+
+    await cache.invalidateChallenge(CHALLENGE);
+
+    expect(await fake.exists(zkey, mkey)).toBe(0);
+    expect(await fake.exists('lb:71:2026-09-16', 'lb:meta:71:2026-09-16')).toBe(
+      2,
+    );
+    expect(await fake.exists('lb:99:2026-09-16', 'lb:meta:99:2026-09-16')).toBe(
+      2,
+    );
+    expect(fake.hashes.has('app:settings')).toBe(true);
+  });
+
+  it('invalidateChallenge swallows Redis errors (no throw)', async () => {
+    const failing = new Proxy(new FakeRedis(), {
+      get(target, prop) {
+        if (prop === 'scan') {
+          return () => {
+            throw new Error('redis down');
+          };
+        }
+        return Reflect.get(target, prop) as never;
+      },
+    }) as unknown as Redis;
+    const cache = cacheWith(failing);
+
+    await expect(cache.invalidateChallenge(CHALLENGE)).resolves.toBeUndefined();
   });
 });

@@ -174,6 +174,14 @@ export class TypeOrmChallengesStore extends ChallengesStore {
           memberships.create({ userId, challengeId, role: 'member' }),
         );
         await invites.update(invite.id, { status: 'accepted' });
+        // A new member changes the daily leaderboard roster: drop every
+        // cached key for the challenge so the next GET rehydrates from the
+        // DB with this member included (a stale zset would silently omit
+        // them until the 48h TTL expired or they synced steps). Best-effort
+        // — Redis errors are swallowed inside the cache; the idempotent
+        // re-join path above intentionally skips this, no cache churn when
+        // nothing changed.
+        await this.cache.invalidateChallenge(challengeId);
         return {
           ok: true,
           challenge: this.toRecord(challenge, memberCount + 1),
@@ -273,7 +281,9 @@ export class TypeOrmChallengesStore extends ChallengesStore {
 
     // Cache-aside (issue #13, PR-B): only AFTER the authorization check —
     // a non-member's 403 must never come from (or leak through) the cache.
-    const cached = await this.cache.get(numericChallengeId, date);
+    // The requester is passed through so a cache hit marks isRequester the
+    // same way the DB path does (issue #13, PR-A contract).
+    const cached = await this.cache.get(numericChallengeId, date, userId);
     if (cached !== null) {
       return cached;
     }

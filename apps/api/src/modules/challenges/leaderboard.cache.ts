@@ -53,10 +53,14 @@ export class LeaderboardCache implements OnApplicationShutdown {
    * Returns the ranked leaderboard from cache, or null on any miss / error
    * (caller rehydrates from the DB). A zset member without its meta field is
    * treated as a miss — serving it would lose the name and the tie-break.
+   * The requester's entry is marked `isRequester: true` when a
+   * `requesterUserId` is given — the same contract as the DB path, so cache
+   * hits never lose the PR-A requester marking.
    */
   async get(
     challengeId: number,
     date: string,
+    requesterUserId?: string,
   ): Promise<LeaderboardEntryRecord[] | null> {
     try {
       const zkey = zsetKey(challengeId, date);
@@ -77,7 +81,7 @@ export class LeaderboardCache implements OnApplicationShutdown {
           joinedAt: parsed.j,
         });
       }
-      return rankLeaderboard(rows);
+      return rankLeaderboard(rows, requesterUserId);
     } catch (error) {
       this.warn('get', challengeId, date, error);
       return null;
@@ -114,6 +118,48 @@ export class LeaderboardCache implements OnApplicationShutdown {
       await pipeline.exec();
     } catch (error) {
       this.warn('set', challengeId, date, error);
+    }
+  }
+
+  /**
+   * Best-effort invalidation of every cached leaderboard key for a
+   * challenge — both `lb:{challengeId}:{date}` zsets and
+   * `lb:meta:{challengeId}:{date}` meta hashes, across ALL dates. Called
+   * when a member joins: a hydrated zset only holds the members present at
+   * hydration time, so without the invalidate the new member would stay
+   * omitted from cached responses until the 48h TTL expired or they synced
+   * steps. SCAN cursor loop (MATCH per key family, COUNT 100) collects the
+   * keys, then DEL removes them in batches of 100. Errors are swallowed
+   * like every other cache op — the cache is an optimization, Postgres is
+   * the source of truth.
+   */
+  async invalidateChallenge(challengeId: number): Promise<void> {
+    try {
+      const keys = new Set<string>();
+      for (const pattern of [
+        `lb:${challengeId}:*`,
+        `lb:meta:${challengeId}:*`,
+      ]) {
+        let cursor = '0';
+        do {
+          const [nextCursor, found] = await this.redis.scan(
+            cursor,
+            'MATCH',
+            pattern,
+            'COUNT',
+            100,
+          );
+          for (const key of found) keys.add(key);
+          cursor = nextCursor;
+        } while (cursor !== '0');
+      }
+      const all = [...keys];
+      for (let i = 0; i < all.length; i += 100) {
+        await this.redis.del(...all.slice(i, i + 100));
+      }
+    } catch (error) {
+      // No date: this op spans every cached day of the challenge.
+      this.warn('invalidateChallenge', challengeId, undefined, error);
     }
   }
 
@@ -166,11 +212,15 @@ export class LeaderboardCache implements OnApplicationShutdown {
   private warn(
     operation: string,
     challengeId: number,
-    date: string,
+    date: string | undefined,
     error: unknown,
   ): void {
+    const scope =
+      date === undefined
+        ? `challenge ${challengeId}`
+        : `challenge ${challengeId}, ${date}`;
     this.logger.warn(
-      `leaderboard cache ${operation} failed (challenge ${challengeId}, ${date}) — falling back to the database: ${String(error)}`,
+      `leaderboard cache ${operation} failed (${scope}) — falling back to the database: ${String(error)}`,
     );
   }
 }
