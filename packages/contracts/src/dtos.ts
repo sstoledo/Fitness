@@ -53,11 +53,46 @@ export const StepSyncBatchDtoSchema = z.object({
   entries: z
     .array(
       z.object({
-        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD"),
-        steps: z.number().int().nonnegative(),
+        date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD")
+          // Round-trip check: rejects impossible calendar dates such as
+          // 2026-02-30 or 2026-99-99 that the regex alone would accept.
+          .refine((value) => {
+            // Slice (not destructure) so noUncheckedIndexedAccess stays happy.
+            const year = Number(value.slice(0, 4));
+            const month = Number(value.slice(5, 7));
+            const day = Number(value.slice(8, 10));
+            const parsed = new Date(Date.UTC(year, month - 1, day));
+            return (
+              parsed.getUTCFullYear() === year &&
+              parsed.getUTCMonth() === month - 1 &&
+              parsed.getUTCDate() === day
+            );
+          }, "date must be a real calendar date"),
+        // 2147483647 is the PostgreSQL int maximum for the steps column.
+        steps: z.number().int().nonnegative().max(2147483647),
       }),
     )
-    .min(1),
+    // Duplicate dates within one batch would hit the same ON CONFLICT target
+    // twice in a single statement (Postgres cardinality error) — reject early.
+    // Max 31 entries: a month of daily syncs; bigger batches only mean abuse
+    // or a bug, and would bloat the upsert + read-back IN(...) query.
+    .min(1)
+    .max(31)
+    .superRefine((entries, ctx) => {
+      const seen = new Set<string>();
+      for (const entry of entries) {
+        if (seen.has(entry.date)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Duplicate date '${entry.date}' in step sync batch.`,
+          });
+          return;
+        }
+        seen.add(entry.date);
+      }
+    }),
 });
 export type StepSyncBatchDto = z.infer<typeof StepSyncBatchDtoSchema>;
 

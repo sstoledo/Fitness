@@ -2,7 +2,7 @@
  * In-memory store: it implements the async ChallengesStore contract with
  * synchronous code, so the methods have no await by design.
  */
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import {
   ChallengesStore,
   MAX_CHALLENGE_MEMBERS,
@@ -11,6 +11,7 @@ import {
   type CreateInviteInput,
   type InviteRecord,
   type JoinChallengeResult,
+  type StepSyncEntryInput,
 } from './challenges.store';
 import { generateInviteToken } from './invite-token';
 
@@ -29,6 +30,8 @@ interface MemoryInvite {
 interface MemoryChallengeRow {
   record: ChallengeRecord;
   memberships: MemoryMembership[];
+  /** Daily step entries keyed by YYYY-MM-DD (idempotent upsert target). */
+  stepsByDate: Map<string, number>;
 }
 
 /**
@@ -72,6 +75,7 @@ export class InMemoryChallengesStore extends ChallengesStore {
     this.challenges.set(record.id, {
       record,
       memberships: [{ userId: input.createdBy, role: 'owner' }],
+      stepsByDate: new Map(),
     });
     return record;
   }
@@ -136,6 +140,29 @@ export class InMemoryChallengesStore extends ChallengesStore {
     return { ok: true, challenge: row.record };
   }
 
+  async syncSteps(
+    userId: string,
+    challengeId: string,
+    entries: StepSyncEntryInput[],
+  ): Promise<{ entries: { date: string; steps: number }[] }> {
+    const row = this.challenges.get(challengeId);
+    // Unknown challenge id is not a membership either: same 403 semantics.
+    if (!row || !row.memberships.some((m) => m.userId === userId)) {
+      throw new ForbiddenException(
+        'Only members can sync steps to a challenge.',
+      );
+    }
+    for (const entry of entries) {
+      row.stepsByDate.set(entry.date, entry.steps);
+    }
+    return {
+      entries: entries.map((entry) => ({
+        date: entry.date,
+        steps: row.stepsByDate.get(entry.date) ?? entry.steps,
+      })),
+    };
+  }
+
   /**
    * Applies the fixture-seeding rules: a known challenge is returned as-is;
    * an unknown one is materialized when the token is a recognizable link
@@ -184,7 +211,11 @@ export class InMemoryChallengesStore extends ChallengesStore {
         role: i === 0 ? 'owner' : 'member',
       }),
     );
-    const row: MemoryChallengeRow = { record, memberships };
+    const row: MemoryChallengeRow = {
+      record,
+      memberships,
+      stepsByDate: new Map(),
+    };
     this.challenges.set(challengeId, row);
     return row;
   }
