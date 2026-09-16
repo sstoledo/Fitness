@@ -22,6 +22,7 @@ import { Membership } from './entities/membership.entity';
 import { UserProfile } from './entities/user-profile.entity';
 import { StepEntry } from '../steps/entities/step-entry.entity';
 import { rankLeaderboard, type LeaderboardRow } from './leaderboard.ranking';
+import { LeaderboardCache } from './leaderboard.cache';
 import { generateInviteToken } from './invite-token';
 
 const INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -52,6 +53,7 @@ export class TypeOrmChallengesStore extends ChallengesStore {
     private readonly stepEntries: Repository<StepEntry>,
     @InjectRepository(UserProfile)
     private readonly users: Repository<UserProfile>,
+    private readonly cache: LeaderboardCache,
   ) {
     super();
   }
@@ -225,12 +227,30 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       },
     });
     const stepsByDate = new Map(rows.map((row) => [row.date, row.steps]));
-    return {
-      entries: entries.map((entry) => ({
-        date: entry.date,
-        steps: stepsByDate.get(entry.date) ?? entry.steps,
-      })),
-    };
+    const syncedEntries = entries.map((entry) => ({
+      date: entry.date,
+      steps: stepsByDate.get(entry.date) ?? entry.steps,
+    }));
+
+    // Write-through to the leaderboard cache (issue #13, PR-B): keep an
+    // already-hydrated daily zset in sync without waiting for the next GET.
+    // The cache only updates EXISTING keys; on any Redis error updateScore
+    // is a swallowed no-op and the next GET rehydrates from the DB.
+    const profile = await this.users.findOneBy({ id: numericUserId });
+    for (const entry of syncedEntries) {
+      await this.cache.updateScore(
+        numericChallengeId,
+        entry.date,
+        String(numericUserId),
+        entry.steps,
+        {
+          joinedAtMs: membership.joinedAt.getTime(),
+          name: profile?.name ?? '',
+        },
+      );
+    }
+
+    return { entries: syncedEntries };
   }
 
   async getDailyLeaderboard(
@@ -249,6 +269,13 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       throw new ForbiddenException(
         'Only members can view the leaderboard of a challenge.',
       );
+    }
+
+    // Cache-aside (issue #13, PR-B): only AFTER the authorization check —
+    // a non-member's 403 must never come from (or leak through) the cache.
+    const cached = await this.cache.get(numericChallengeId, date);
+    if (cached !== null) {
+      return cached;
     }
 
     // One row per member of the challenge: INNER JOIN the domain user profile
@@ -290,6 +317,11 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       steps: Number(row.steps),
       joinedAt: row.joinedAt,
     }));
+// Fill the cache with the same rows used for ranking (name + joinedAt
+    // included, so the meta hash carries the tie-break inputs). A Redis
+    // failure is swallowed inside the cache — the ranked DB result is
+    // returned regardless.
+    await this.cache.set(numericChallengeId, date, leaderboardRows);
     return rankLeaderboard(leaderboardRows, userId);
   }
 
