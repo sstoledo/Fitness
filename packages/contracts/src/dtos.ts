@@ -101,6 +101,7 @@ export const LeaderboardEntryDtoSchema = z.object({
   name: z.string(),
   steps: z.number().int().nonnegative(),
   rank: z.number().int().positive(),
+  isRequester: z.boolean(),
 });
 export type LeaderboardEntryDto = z.infer<typeof LeaderboardEntryDtoSchema>;
 

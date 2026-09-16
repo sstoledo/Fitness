@@ -56,6 +56,7 @@ interface LeaderboardEntryBody {
   name: string;
   steps: number;
   rank: number;
+  isRequester: boolean;
 }
 interface ErrorMessageBody {
   message: string | string[];
@@ -392,8 +393,20 @@ describe('StepsController (e2e contract)', () => {
         .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
 
       expect(response.body).toEqual([
-        { userId: memberId, name: memberId, steps: 7000, rank: 1 },
-        { userId: ownerId, name: ownerId, steps: 5000, rank: 2 },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 7000,
+          rank: 1,
+          isRequester: false,
+        },
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 5000,
+          rank: 2,
+          isRequester: true,
+        },
       ]);
     });
 
@@ -419,8 +432,20 @@ describe('StepsController (e2e contract)', () => {
 
       // Both rank 1; the owner joined at create time so they come first.
       expect(response.body).toEqual([
-        { userId: ownerId, name: ownerId, steps: 3000, rank: 1 },
-        { userId: memberId, name: memberId, steps: 3000, rank: 1 },
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 3000,
+          rank: 1,
+          isRequester: false,
+        },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 3000,
+          rank: 1,
+          isRequester: true,
+        },
       ]);
     });
 
@@ -440,8 +465,20 @@ describe('StepsController (e2e contract)', () => {
         .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
 
       expect(response.body).toEqual([
-        { userId: ownerId, name: ownerId, steps: 1000, rank: 1 },
-        { userId: memberId, name: memberId, steps: 0, rank: 2 },
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 1000,
+          rank: 1,
+          isRequester: true,
+        },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 0,
+          rank: 2,
+          isRequester: false,
+        },
       ]);
     });
 
@@ -481,8 +518,20 @@ describe('StepsController (e2e contract)', () => {
         .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
 
       expect(response.body).toEqual([
-        { userId: ownerId, name: ownerId, steps: 0, rank: 1 },
-        { userId: memberId, name: memberId, steps: 0, rank: 1 },
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 0,
+          rank: 1,
+          isRequester: true,
+        },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 0,
+          rank: 1,
+          isRequester: false,
+        },
       ]);
     });
   });

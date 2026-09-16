@@ -49,6 +49,7 @@ interface LeaderboardEntryBody {
   name: string;
   steps: number;
   rank: number;
+  isRequester: boolean;
 }
 interface ErrorMessageBody {
   message: string | string[];
@@ -535,9 +536,10 @@ describe.skipIf(!runIntegration)(
         .expect(403)) as unknown as SuperResponse<ErrorMessageBody>;
       expect(forbidden.body.message).toMatch(/member/i);
 
-      // 5. Alice reads the leaderboard: bare array, Bob first (rank 1), and
-      //    the names come from the domain user profile (proves the
-      //    UserProfile INNER JOIN, not the auth session).
+      // 5. Alice reads the leaderboard: bare array, Bob first (rank 1), the
+      //    names come from the domain user profile (proves the UserProfile
+      //    INNER JOIN, not the auth session), and Alice's own entry is
+      //    marked as the requester.
       const leaderboard = (await request(httpServer)
         .get(`/api/challenges/${challengeId}/leaderboard?date=${syncDate}`)
         .set('Authorization', `Bearer ${aliceToken}`)
@@ -546,12 +548,14 @@ describe.skipIf(!runIntegration)(
       expect(leaderboard.body).toHaveLength(2);
       const [first, second] = leaderboard.body;
       // Bob walked more: rank 1. His userId is his own numeric domain id as
-      // a string (not Alice's) and the name comes from the domain user
-      // profile (proves the UserProfile INNER JOIN, not the auth session).
+      // a string (not Alice's), the name comes from the domain user profile
+      // (proves the UserProfile INNER JOIN, not the auth session), and he is
+      // not the requester.
       expect(first).toMatchObject({
         name: 'Integration Leaderboard Bob',
         steps: 9000,
         rank: 1,
+        isRequester: false,
       });
       expect(typeof first?.userId).toBe('string');
       expect(Number(first?.userId)).toBeGreaterThan(0);
@@ -561,6 +565,7 @@ describe.skipIf(!runIntegration)(
         name: 'Integration Leaderboard Alice',
         steps: 4000,
         rank: 2,
+        isRequester: true,
       });
     });
   },

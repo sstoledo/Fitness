@@ -11,7 +11,9 @@ describe('rankLeaderboard', () => {
       rankLeaderboard([
         { userId: 'u1', name: 'One', steps: 42, joinedAt: 100 },
       ]),
-    ).toEqual([{ userId: 'u1', name: 'One', steps: 42, rank: 1 }]);
+    ).toEqual([
+      { userId: 'u1', name: 'One', steps: 42, rank: 1, isRequester: false },
+    ]);
   });
 
   it('orders rows by steps descending', () => {
@@ -55,6 +57,42 @@ describe('rankLeaderboard', () => {
     ];
     const rowsB = [...rowsA].reverse();
     expect(rankLeaderboard(rowsA)).toEqual(rankLeaderboard(rowsB));
+  });
+
+  it('breaks full ties (same steps AND joinedAt) by userId ascending, regardless of input order', () => {
+    const rowsA: LeaderboardRow[] = [
+      { userId: 'u-b', name: 'Bee', steps: 100, joinedAt: 500 },
+      { userId: 'u-a', name: 'Aye', steps: 100, joinedAt: 500 },
+      { userId: 'u-c', name: 'Cee', steps: 100, joinedAt: 500 },
+    ];
+    const rowsB = [...rowsA].reverse();
+    expect(rankLeaderboard(rowsA).map((row) => row.userId)).toEqual([
+      'u-a',
+      'u-b',
+      'u-c',
+    ]);
+    expect(rankLeaderboard(rowsB).map((row) => row.userId)).toEqual([
+      'u-a',
+      'u-b',
+      'u-c',
+    ]);
+    expect(rankLeaderboard(rowsA)).toEqual(rankLeaderboard(rowsB));
+  });
+
+  it('marks only the requester entry with isRequester true', () => {
+    const rows: LeaderboardRow[] = [
+      { userId: 'u1', name: 'One', steps: 100, joinedAt: 100 },
+      { userId: 'u2', name: 'Two', steps: 300, joinedAt: 200 },
+    ];
+    const ranked = rankLeaderboard(rows, 'u2');
+    expect(ranked.map((row) => row.isRequester)).toEqual([true, false]);
+    expect(ranked[0]).toMatchObject({ userId: 'u2', isRequester: true });
+    expect(ranked[1]).toMatchObject({ userId: 'u1', isRequester: false });
+    // Backward compatible: without a requester every entry is false.
+    expect(rankLeaderboard(rows).map((row) => row.isRequester)).toEqual([
+      false,
+      false,
+    ]);
   });
 
   it('does not mutate the input array', () => {

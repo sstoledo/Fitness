@@ -290,7 +290,7 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       steps: Number(row.steps),
       joinedAt: row.joinedAt,
     }));
-    return rankLeaderboard(leaderboardRows);
+    return rankLeaderboard(leaderboardRows, userId);
   }
 
   private async memberCounts(

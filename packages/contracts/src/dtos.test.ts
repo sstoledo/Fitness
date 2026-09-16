@@ -161,15 +161,36 @@ describe("StepSyncBatchDtoSchema", () => {
 describe("LeaderboardEntryDtoSchema", () => {
   it("accepts a valid entry", () => {
     expect(
-      LeaderboardEntryDtoSchema.safeParse({ userId: "u1", name: "Ada", steps: 1200, rank: 1 })
-        .success,
+      LeaderboardEntryDtoSchema.safeParse({
+        userId: "u1",
+        name: "Ada",
+        steps: 1200,
+        rank: 1,
+        isRequester: true,
+      }).success,
     ).toBe(true);
   });
 
   it("rejects rank 0", () => {
     expect(
-      LeaderboardEntryDtoSchema.safeParse({ userId: "u1", name: "Ada", steps: 1200, rank: 0 })
-        .success,
+      LeaderboardEntryDtoSchema.safeParse({
+        userId: "u1",
+        name: "Ada",
+        steps: 1200,
+        rank: 0,
+        isRequester: false,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects a missing isRequester", () => {
+    expect(
+      LeaderboardEntryDtoSchema.safeParse({
+        userId: "u1",
+        name: "Ada",
+        steps: 1200,
+        rank: 1,
+      }).success,
     ).toBe(false);
   });
 });

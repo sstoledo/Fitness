@@ -217,7 +217,7 @@ export class InMemoryChallengesStore extends ChallengesStore {
       steps: row.stepsByUser.get(membership.userId)?.get(date) ?? 0,
       joinedAt: membership.joinedAt,
     }));
-    return rankLeaderboard(rows);
+    return rankLeaderboard(rows, userId);
   }
 
   /**
