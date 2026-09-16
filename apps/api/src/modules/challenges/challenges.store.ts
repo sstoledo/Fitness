@@ -70,6 +70,10 @@ export interface StepSyncEntryInput {
   steps: number;
 }
 
+import type { LeaderboardEntryRecord } from './leaderboard.ranking';
+
+export type { LeaderboardEntryRecord } from './leaderboard.ranking';
+
 export abstract class ChallengesStore {
   abstract createChallenge(
     input: CreateChallengeInput,
@@ -111,4 +115,17 @@ export abstract class ChallengesStore {
     challengeId: string,
     entries: StepSyncEntryInput[],
   ): Promise<{ entries: { date: string; steps: number }[] }>;
+
+  /**
+   * Daily leaderboard for a challenge (issue #13): all members ranked by
+   * steps on one calendar day. Members without a step entry for the date
+   * appear with steps 0. Non-members (or unknown challenges) get a 403 with
+   * the same semantics as syncSteps. Ranking itself lives in the shared pure
+   * function `rankLeaderboard` (leaderboard.ranking.ts).
+   */
+  abstract getDailyLeaderboard(
+    userId: string,
+    challengeId: string,
+    date: string, // YYYY-MM-DD
+  ): Promise<LeaderboardEntryRecord[]>;
 }

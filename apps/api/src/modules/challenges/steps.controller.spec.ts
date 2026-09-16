@@ -51,6 +51,13 @@ interface InviteResponseBody {
 interface StepSyncResponseBody {
   entries: { date: string; steps: number }[];
 }
+interface LeaderboardEntryBody {
+  userId: string;
+  name: string;
+  steps: number;
+  rank: number;
+  isRequester: boolean;
+}
 interface ErrorMessageBody {
   message: string | string[];
 }
@@ -316,6 +323,216 @@ describe('StepsController (e2e contract)', () => {
         .set('Authorization', memberBearer)
         .send({ entries: makeEntries(31) })
         .expect(200);
+    });
+  });
+
+  describe('GET /api/challenges/:id/leaderboard', () => {
+    let leaderboardChallengeId: string;
+
+    // In the memory flavour the bearer token itself is the user id (trusted
+    // bearer of the test guard), and the memory store uses that same id as
+    // the display name — see MemoryMembership.name.
+    const ownerId = `steps-owner-${runId}`;
+    const memberId = `steps-member-${runId}`;
+
+    it('rejects the leaderboard request without a session token with 401', async () => {
+      await request(app)
+        .get(`/api/challenges/challenge-${runId}/leaderboard`)
+        .expect(401);
+    });
+
+    it('rejects a non-member user with 403', async () => {
+      const created = (await request(app)
+        .post('/api/challenges')
+        .set('Authorization', ownerBearer)
+        .send(validCreateBody)
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      leaderboardChallengeId = created.body.challenge.id;
+
+      const response = (await request(app)
+        .get(`/api/challenges/${leaderboardChallengeId}/leaderboard`)
+        .set('Authorization', `Bearer leaderboard-stranger-${runId}`)
+        .expect(403)) as unknown as SuperResponse<ErrorMessageBody>;
+
+      expect(response.body.message).toMatch(/member/i);
+    });
+
+    it('ranks all members by steps with a bare LeaderboardEntryDto[] body', async () => {
+      // Invite the member user into this challenge too, then both sync
+      // different step counts for the same date — the per-user storage fix
+      // means neither sync overwrites the other.
+      const invite = (await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/invites`)
+        .set('Authorization', ownerBearer)
+        .send({})
+        .expect(201)) as unknown as SuperResponse<InviteResponseBody>;
+
+      await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/join`)
+        .set('Authorization', memberBearer)
+        .send({ inviteToken: invite.body.invite.token })
+        .expect(200);
+
+      const date = '2026-09-20';
+      await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/steps`)
+        .set('Authorization', ownerBearer)
+        .send({ entries: [{ date, steps: 5000 }] })
+        .expect(200);
+      await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({ entries: [{ date, steps: 7000 }] })
+        .expect(200);
+
+      const response = (await request(app)
+        .get(
+          `/api/challenges/${leaderboardChallengeId}/leaderboard?date=${date}`,
+        )
+        .set('Authorization', ownerBearer)
+        .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
+
+      expect(response.body).toEqual([
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 7000,
+          rank: 1,
+          isRequester: false,
+        },
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 5000,
+          rank: 2,
+          isRequester: true,
+        },
+      ]);
+    });
+
+    it('gives tied members the same rank, ordered by earliest join', async () => {
+      const date = '2026-09-21';
+      await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/steps`)
+        .set('Authorization', ownerBearer)
+        .send({ entries: [{ date, steps: 3000 }] })
+        .expect(200);
+      await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({ entries: [{ date, steps: 3000 }] })
+        .expect(200);
+
+      const response = (await request(app)
+        .get(
+          `/api/challenges/${leaderboardChallengeId}/leaderboard?date=${date}`,
+        )
+        .set('Authorization', memberBearer)
+        .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
+
+      // Both rank 1; the owner joined at create time so they come first.
+      expect(response.body).toEqual([
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 3000,
+          rank: 1,
+          isRequester: false,
+        },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 3000,
+          rank: 1,
+          isRequester: true,
+        },
+      ]);
+    });
+
+    it('lists a member without steps for the date with steps 0 at the last rank', async () => {
+      const date = '2026-09-22';
+      await request(app)
+        .post(`/api/challenges/${leaderboardChallengeId}/steps`)
+        .set('Authorization', ownerBearer)
+        .send({ entries: [{ date, steps: 1000 }] })
+        .expect(200);
+
+      const response = (await request(app)
+        .get(
+          `/api/challenges/${leaderboardChallengeId}/leaderboard?date=${date}`,
+        )
+        .set('Authorization', ownerBearer)
+        .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
+
+      expect(response.body).toEqual([
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 1000,
+          rank: 1,
+          isRequester: true,
+        },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 0,
+          rank: 2,
+          isRequester: false,
+        },
+      ]);
+    });
+
+    it('rejects invalid dates with 400', async () => {
+      for (const date of ['2026-02-30', '99/99/9999']) {
+        const response = (await request(app)
+          .get(
+            `/api/challenges/${leaderboardChallengeId}/leaderboard?date=${encodeURIComponent(date)}`,
+          )
+          .set('Authorization', ownerBearer)
+          .expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
+
+        expect(response.body.message).toEqual(expect.any(Array));
+        expect(response.body.message.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('defaults to the server UTC today when date is omitted', async () => {
+      const response = (await request(app)
+        .get(`/api/challenges/${leaderboardChallengeId}/leaderboard`)
+        .set('Authorization', ownerBearer)
+        .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
+
+      expect(response.body).toEqual(expect.any(Array));
+      // Nobody synced for the server-today date in this challenge: all
+      // members tie at 0 steps, still ranked.
+      expect(response.body.length).toBe(2);
+    });
+
+    it('ranks every member with steps 0 for a date nobody synced to', async () => {
+      const date = '2026-09-23';
+      const response = (await request(app)
+        .get(
+          `/api/challenges/${leaderboardChallengeId}/leaderboard?date=${date}`,
+        )
+        .set('Authorization', ownerBearer)
+        .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
+
+      expect(response.body).toEqual([
+        {
+          userId: ownerId,
+          name: ownerId,
+          steps: 0,
+          rank: 1,
+          isRequester: true,
+        },
+        {
+          userId: memberId,
+          name: memberId,
+          steps: 0,
+          rank: 1,
+          isRequester: false,
+        },
+      ]);
     });
   });
 });

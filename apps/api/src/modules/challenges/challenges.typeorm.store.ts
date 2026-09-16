@@ -13,12 +13,15 @@ import {
   type CreateInviteInput,
   type InviteRecord,
   type JoinChallengeResult,
+  type LeaderboardEntryRecord,
   type StepSyncEntryInput,
 } from './challenges.store';
 import { Challenge } from './entities/challenge.entity';
 import { Invite } from './entities/invite.entity';
 import { Membership } from './entities/membership.entity';
+import { UserProfile } from './entities/user-profile.entity';
 import { StepEntry } from '../steps/entities/step-entry.entity';
+import { rankLeaderboard, type LeaderboardRow } from './leaderboard.ranking';
 import { generateInviteToken } from './invite-token';
 
 const INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -47,6 +50,8 @@ export class TypeOrmChallengesStore extends ChallengesStore {
     @InjectRepository(Invite) private readonly invites: Repository<Invite>,
     @InjectRepository(StepEntry)
     private readonly stepEntries: Repository<StepEntry>,
+    @InjectRepository(UserProfile)
+    private readonly users: Repository<UserProfile>,
   ) {
     super();
   }
@@ -226,6 +231,66 @@ export class TypeOrmChallengesStore extends ChallengesStore {
         steps: stepsByDate.get(entry.date) ?? entry.steps,
       })),
     };
+  }
+
+  async getDailyLeaderboard(
+    userId: string,
+    challengeId: string,
+    date: string,
+  ): Promise<LeaderboardEntryRecord[]> {
+    const numericUserId = this.toNumericId(userId);
+    const numericChallengeId = this.toNumericId(challengeId);
+
+    const membership = await this.memberships.findOneBy({
+      challengeId: numericChallengeId,
+      userId: numericUserId,
+    });
+    if (!membership) {
+      throw new ForbiddenException(
+        'Only members can view the leaderboard of a challenge.',
+      );
+    }
+
+    // One row per member of the challenge: INNER JOIN the domain user profile
+    // for the display name (every membership references an existing profile),
+    // LEFT JOIN that member's step entry for the requested day — members
+    // without an entry must still appear, with steps 0.
+    interface LeaderboardQueryRow {
+      userId: number;
+      name: string;
+      steps: number;
+      joinedAt: Date;
+    }
+    const rows: LeaderboardQueryRow[] = await this.users
+      .createQueryBuilder('user')
+      .innerJoin(
+        Membership,
+        'membership',
+        'membership."userId" = user.id AND membership."challengeId" = :challengeId',
+        { challengeId: numericChallengeId },
+      )
+      .leftJoin(
+        StepEntry,
+        'stepEntry',
+        // The alias keeps its camelCase in the quoted JOIN — reference it
+        // quoted here too, or Postgres folds it to "stepentry" and the query
+        // fails with "missing FROM-clause entry".
+        '"stepEntry"."userId" = "user"."id" AND "stepEntry"."challengeId" = :challengeId AND "stepEntry".date = :date',
+        { challengeId: numericChallengeId, date },
+      )
+      .select('user.id', 'userId')
+      .addSelect('user.name', 'name')
+      .addSelect('membership."joinedAt"', 'joinedAt')
+      .addSelect('COALESCE(stepEntry.steps, 0)', 'steps')
+      .getRawMany();
+
+    const leaderboardRows: LeaderboardRow[] = rows.map((row) => ({
+      userId: String(row.userId),
+      name: row.name,
+      steps: Number(row.steps),
+      joinedAt: row.joinedAt,
+    }));
+    return rankLeaderboard(leaderboardRows, userId);
   }
 
   private async memberCounts(

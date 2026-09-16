@@ -5,7 +5,11 @@ import {
   Injectable,
 } from '@nestjs/common';
 import type { AuthSessionUser } from '../auth/session.guard';
-import { ChallengesStore, type StepSyncEntryInput } from './challenges.store';
+import {
+  ChallengesStore,
+  type LeaderboardEntryRecord,
+  type StepSyncEntryInput,
+} from './challenges.store';
 
 /**
  * Wire shape of `ChallengeDto` from `@fitness/contracts`. The api does not
@@ -127,6 +131,24 @@ export class ChallengesService {
       seenDates.add(entry.date);
     }
     return this.store.syncSteps(userId, challengeId, entries);
+  }
+
+  /**
+   * Daily leaderboard for a challenge (issue #13) — thin passthrough to the
+   * store, which owns the membership check (403). When no date is given the
+   * leaderboard defaults to the server's current UTC calendar day.
+   *
+   * Wire shape of `LeaderboardEntryDto` from `@fitness/contracts` (the api
+   * does not import the package, same reason as ChallengeDto above): string
+   * userId, rank starting at 1, steps >= 0, ties sharing a rank.
+   */
+  async getDailyLeaderboard(
+    userId: string,
+    challengeId: string,
+    date?: string,
+  ): Promise<LeaderboardEntryRecord[]> {
+    const day = date ?? new Date().toISOString().slice(0, 10);
+    return this.store.getDailyLeaderboard(userId, challengeId, day);
   }
 
   private toDto(record: {
