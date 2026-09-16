@@ -19,6 +19,8 @@ class FakeRedis {
   readonly zsets = new Map<string, Map<string, number>>();
   readonly hashes = new Map<string, Map<string, string>>();
   readonly ttls = new Map<string, number>();
+  /** Number of pipelines built — proves how many round-trips a call costs. */
+  pipelineCalls = 0;
 
   private zset(key: string): Map<string, number> {
     let z = this.zsets.get(key);
@@ -130,6 +132,7 @@ class FakeRedis {
   }
 
   pipeline(): FakePipeline {
+    this.pipelineCalls += 1;
     return new FakePipeline(this);
   }
 
@@ -142,26 +145,48 @@ class FakeRedis {
 }
 
 class FakePipeline {
+  // Commands are queued and only run on exec(), in order — mirroring how real
+  // ioredis applies a pipeline atomically and returns one reply per command.
+  private readonly commands: (() => Promise<unknown>)[] = [];
+
   constructor(private readonly redis: FakeRedis) {}
 
   zadd(key: string, score: number, member: string): this {
-    void this.redis.zadd(key, score, member);
+    this.commands.push(() => this.redis.zadd(key, score, member));
     return this;
   }
   hset(key: string, field: string, value: string): this {
-    void this.redis.hset(key, field, value);
+    this.commands.push(() => this.redis.hset(key, field, value));
+    return this;
+  }
+  hexists(key: string, field: string): this {
+    this.commands.push(() => this.redis.hexists(key, field));
+    return this;
+  }
+  exists(...keys: string[]): this {
+    this.commands.push(() => this.redis.exists(...keys));
     return this;
   }
   expire(key: string, seconds: number): this {
-    void this.redis.expire(key, seconds);
+    this.commands.push(() => this.redis.expire(key, seconds));
     return this;
   }
   del(...keys: string[]): this {
-    void this.redis.del(...keys);
+    this.commands.push(() => this.redis.del(...keys));
     return this;
   }
-  async exec(): Promise<unknown[]> {
-    return [];
+
+  /** Mirrors ioredis: replies are `[error, result]` tuples in command order. */
+  async exec(): Promise<[Error | null, unknown][]> {
+    const replies: [Error | null, unknown][] = [];
+    for (const command of this.commands) {
+      try {
+        replies.push([null, await command()]);
+      } catch (error) {
+        replies.push([error as Error, null]);
+      }
+    }
+    return replies;
   }
 }
 
@@ -258,10 +283,10 @@ describe('LeaderboardCache', () => {
     expect(await cache.get(CHALLENGE, DATE)).toBeNull();
   });
 
-  it('swallows Redis errors: get returns null, set/updateScore do not throw', async () => {
+  it('swallows Redis errors: get returns null, set/updateScores do not throw', async () => {
     const fake = new FakeRedis();
     // A client whose zrevrange/pipeline blow up — everything else delegates
-    // to the healthy fake (updateScore's EXISTS check still succeeds).
+    // to the healthy fake (updateScores's probe pipeline throws first).
     const failing = new Proxy(fake, {
       get(target, prop) {
         if (prop === 'zrevrange' || prop === 'pipeline') {
@@ -279,25 +304,40 @@ describe('LeaderboardCache', () => {
       cache.set(CHALLENGE, DATE, rows({ steps: 1 })),
     ).resolves.toBeUndefined();
     await expect(
-      cache.updateScore(CHALLENGE, DATE, 'u1', 10, {
+      cache.updateScores({
+        challengeId: CHALLENGE,
+        userId: 'u1',
         joinedAtMs: 100,
-        name: 'One',
+        entries: [{ date: DATE, steps: 10 }],
+        resolveName: async () => 'One',
       }),
     ).resolves.toBeUndefined();
   });
 
-  it('updateScore on a missing key is a no-op (no key is created)', async () => {
+  it('updateScores on a cold cache is a no-op: no key created, resolveName never called', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.updateScore(CHALLENGE, DATE, 'u1', 10_000, {
+    let resolveNameCalls = 0;
+
+    await cache.updateScores({
+      challengeId: CHALLENGE,
+      userId: 'u1',
       joinedAtMs: 100,
-      name: 'One',
+      entries: [{ date: DATE, steps: 10_000 }],
+      resolveName: async () => {
+        resolveNameCalls += 1;
+        return 'One';
+      },
     });
+
+    expect(resolveNameCalls).toBe(0);
     expect(await fake.exists(zkey)).toBe(0);
     expect(await fake.exists(mkey)).toBe(0);
+    // One probe round-trip, zero writes — the DB fallback stays untouched.
+    expect(fake.pipelineCalls).toBe(1);
   });
 
-  it('updateScore on an existing key updates the score and refreshes the TTL', async () => {
+  it('updateScores updates existing keys in one batched write and refreshes the TTL', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
     await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
@@ -305,19 +345,97 @@ describe('LeaderboardCache', () => {
     // Simulate an aged key, then write through.
     fake.ttls.set(zkey, 60);
     fake.ttls.set(mkey, 60);
-    await cache.updateScore(CHALLENGE, DATE, 'u1', 10_000, {
-      joinedAtMs: 100,
-      name: 'User 1',
+    const pipelinesBefore = fake.pipelineCalls;
+    let resolveNameCalls = 0;
+
+    await cache.updateScores({
+      challengeId: CHALLENGE,
+      userId: 'u1',
+      joinedAtMs: 9999,
+      entries: [{ date: DATE, steps: 10_000 }],
+      resolveName: async () => {
+        resolveNameCalls += 1;
+        return 'User 1';
+      },
     });
 
     expect((await fake.zrevrange(zkey, 0, -1, 'WITHSCORES'))[1]).toBe('10000');
     expect(fake.ttls.get(zkey)).toBe(LEADERBOARD_TTL_SECONDS);
     expect(fake.ttls.get(mkey)).toBe(LEADERBOARD_TTL_SECONDS);
-    // Meta was already present → original joinedAt preserved.
+    // Meta was already present → original joinedAt preserved, no profile query.
     const meta = JSON.parse(fake.hashes.get(mkey)!.get('u1')!) as {
       j: number;
     };
     expect(meta.j).toBe(1000);
+    expect(resolveNameCalls).toBe(0);
+    // Probe + write: exactly two pipelined round-trips for the batch.
+    expect(fake.pipelineCalls - pipelinesBefore).toBe(2);
+  });
+
+  it('updateScores writes meta only when the field is missing, calling resolveName once', async () => {
+    const fake = new FakeRedis();
+    const cache = cacheWith(fake);
+    // A hydrated zset whose meta field is gone (partial write): the batch
+    // must repair the meta using resolveName, once for the whole payload.
+    fake.zsets.set(zkey, new Map([['u1', 100]]));
+    let resolveNameCalls = 0;
+
+    await cache.updateScores({
+      challengeId: CHALLENGE,
+      userId: 'u1',
+      joinedAtMs: 4242,
+      entries: [{ date: DATE, steps: 5000 }],
+      resolveName: async () => {
+        resolveNameCalls += 1;
+        return 'Fresh Name';
+      },
+    });
+
+    expect(resolveNameCalls).toBe(1);
+    expect(JSON.parse(fake.hashes.get(mkey)!.get('u1')!)).toEqual({
+      j: 4242,
+      n: 'Fresh Name',
+    });
+    expect((await fake.zrevrange(zkey, 0, -1, 'WITHSCORES'))[1]).toBe('5000');
+  });
+
+  it('updateScores updates every existing date in two round-trips (multi-date batch)', async () => {
+    const fake = new FakeRedis();
+    const cache = cacheWith(fake);
+    const secondDate = '2026-09-15';
+    const staleDate = '2026-09-14';
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
+    await cache.set(CHALLENGE, secondDate, rows({ userId: 'u1', steps: 200 }));
+    const pipelinesBefore = fake.pipelineCalls;
+
+    await cache.updateScores({
+      challengeId: CHALLENGE,
+      userId: 'u1',
+      joinedAtMs: 1000,
+      entries: [
+        { date: DATE, steps: 11_000 },
+        { date: secondDate, steps: 22_000 },
+        { date: staleDate, steps: 33_000 },
+      ],
+      resolveName: async () => 'User 1',
+    });
+
+    expect((await fake.zrevrange(zkey, 0, -1, 'WITHSCORES'))[1]).toBe('11000');
+    expect(
+      (
+        await fake.zrevrange(
+          `lb:${CHALLENGE}:${secondDate}`,
+          0,
+          -1,
+          'WITHSCORES',
+        )
+      )[1],
+    ).toBe('22000');
+    // The never-hydrated date stays absent — the cold key is not created.
+    expect(await fake.exists(`lb:${CHALLENGE}:${staleDate}`)).toBe(0);
+    expect(await fake.exists(`lb:meta:${CHALLENGE}:${staleDate}`)).toBe(0);
+    // Two round-trips no matter how many dates are in the payload.
+    expect(fake.pipelineCalls - pipelinesBefore).toBe(2);
   });
 
   it('set with empty rows only deletes stale keys and creates nothing', async () => {

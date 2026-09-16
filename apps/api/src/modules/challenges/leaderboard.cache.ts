@@ -43,6 +43,12 @@ function joinedAtMs(joinedAt: Date | number): number {
   return joinedAt instanceof Date ? joinedAt.getTime() : joinedAt;
 }
 
+/** Pipeline replies are `[error, result]` tuples; results arrive as unknown. */
+function replyCount(reply: [Error | null, unknown] | undefined): number {
+  const result = reply?.[1];
+  return typeof result === 'number' ? result : 0;
+}
+
 @Injectable()
 export class LeaderboardCache implements OnApplicationShutdown {
   private readonly logger = new Logger(LeaderboardCache.name);
@@ -164,35 +170,69 @@ export class LeaderboardCache implements OnApplicationShutdown {
   }
 
   /**
-   * Write-through for syncSteps. Only touches EXISTING keys — if the
-   * leaderboard was never hydrated there is nothing to update (the next GET
-   * fills it from the DB). Meta is written only when the field is missing so
-   * re-syncs never overwrite the original joinedAt. Refreshes the TTL on both
-   * keys.
+   * Write-through batch for syncSteps: updates EXISTING daily keys only (a
+   * key that was never hydrated has nothing to update — the next GET fills
+   * it from the DB). Two round-trips total regardless of entry count: one
+   * pipelined probe (zset exists + meta-field hexists per date), then one
+   * pipelined write. The meta field is written only when missing so re-syncs
+   * never overwrite the original joinedAt; TTL re-armed on both keys. The
+   * `resolveName` callback runs ONLY when at least one existing key needs a
+   * new meta field — never on a cold cache (no wasted profile query).
+   * Errors are swallowed like every other cache op.
    */
-  async updateScore(
-    challengeId: number,
-    date: string,
-    userId: string,
-    steps: number,
-    meta?: { joinedAtMs: number; name: string },
-  ): Promise<void> {
+  async updateScores(input: {
+    challengeId: number;
+    userId: string;
+    joinedAtMs: number;
+    entries: { date: string; steps: number }[];
+    resolveName: () => Promise<string | undefined>;
+  }): Promise<void> {
+    const { challengeId, userId, joinedAtMs, entries } = input;
     try {
-      const zkey = zsetKey(challengeId, date);
-      const mkey = metaKey(challengeId, date);
-      if ((await this.redis.exists(zkey)) === 0) return;
-
-      const pipeline = this.redis.pipeline();
-      pipeline.zadd(zkey, steps, userId);
-      if (meta && (await this.redis.hexists(mkey, userId)) === 0) {
-        const payload: MetaPayload = { j: meta.joinedAtMs, n: meta.name };
-        pipeline.hset(mkey, userId, JSON.stringify(payload));
+      // RTT #1: probe every date in one pipeline. `hexists` on a missing hash
+      // returns 0 without creating it, so a cold cache creates nothing.
+      const probe = this.redis.pipeline();
+      for (const entry of entries) {
+        probe.exists(zsetKey(challengeId, entry.date));
+        probe.hexists(metaKey(challengeId, entry.date), userId);
       }
-      pipeline.expire(zkey, LEADERBOARD_TTL_SECONDS);
-      pipeline.expire(mkey, LEADERBOARD_TTL_SECONDS);
-      await pipeline.exec();
+      const probeResults = await probe.exec();
+      if (!probeResults) return;
+
+      const existing: { date: string; steps: number; needsMeta: boolean }[] =
+        [];
+      for (let i = 0; i < entries.length; i += 1) {
+        if (replyCount(probeResults[i * 2]) === 0) continue;
+        existing.push({
+          date: entries[i].date,
+          steps: entries[i].steps,
+          needsMeta: replyCount(probeResults[i * 2 + 1]) === 0,
+        });
+      }
+      // Cold cache: nothing hydrated for these dates — zero writes, zero DB.
+      if (existing.length === 0) return;
+
+      // The profile lookup is lazy: only a missing meta field needs the name.
+      const name = existing.some((entry) => entry.needsMeta)
+        ? ((await input.resolveName()) ?? '')
+        : '';
+
+      // RTT #2: one pipelined write covering every existing date.
+      const write = this.redis.pipeline();
+      for (const entry of existing) {
+        const zkey = zsetKey(challengeId, entry.date);
+        const mkey = metaKey(challengeId, entry.date);
+        write.zadd(zkey, entry.steps, userId);
+        if (entry.needsMeta) {
+          const payload: MetaPayload = { j: joinedAtMs, n: name };
+          write.hset(mkey, userId, JSON.stringify(payload));
+        }
+        write.expire(zkey, LEADERBOARD_TTL_SECONDS);
+        write.expire(mkey, LEADERBOARD_TTL_SECONDS);
+      }
+      await write.exec();
     } catch (error) {
-      this.warn('updateScore', challengeId, date, error);
+      this.warn('updateScores', challengeId, entries[0]?.date, error);
     }
   }
 

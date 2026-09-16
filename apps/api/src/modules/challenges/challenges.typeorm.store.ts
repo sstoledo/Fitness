@@ -240,23 +240,25 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       steps: stepsByDate.get(entry.date) ?? entry.steps,
     }));
 
-    // Write-through to the leaderboard cache (issue #13, PR-B): keep an
-    // already-hydrated daily zset in sync without waiting for the next GET.
-    // The cache only updates EXISTING keys; on any Redis error updateScore
-    // is a swallowed no-op and the next GET rehydrates from the DB.
-    const profile = await this.users.findOneBy({ id: numericUserId });
-    for (const entry of syncedEntries) {
-      await this.cache.updateScore(
-        numericChallengeId,
-        entry.date,
-        String(numericUserId),
-        entry.steps,
-        {
-          joinedAtMs: membership.joinedAt.getTime(),
-          name: profile?.name ?? '',
-        },
-      );
-    }
+    // Write-through to the leaderboard cache (issue #13, PR-B): one batched
+    // call keeps every already-hydrated daily zset in sync without waiting
+    // for the next GET. The cache only updates EXISTING keys, in two Redis
+    // round-trips for the whole payload (probe + write); on any Redis error
+    // updateScores is a swallowed no-op and the next GET rehydrates from the
+    // DB. The profile lookup inside resolveName runs lazily — only when the
+    // batch actually needs a missing meta field, so a cold cache never pays
+    // the extra query.
+    await this.cache.updateScores({
+      challengeId: numericChallengeId,
+      userId: String(numericUserId),
+      joinedAtMs: membership.joinedAt.getTime(),
+      entries: syncedEntries.map((entry) => ({
+        date: entry.date,
+        steps: entry.steps,
+      })),
+      resolveName: async () =>
+        (await this.users.findOneBy({ id: numericUserId }))?.name ?? '',
+    });
 
     return { entries: syncedEntries };
   }
@@ -327,7 +329,7 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       steps: Number(row.steps),
       joinedAt: row.joinedAt,
     }));
-// Fill the cache with the same rows used for ranking (name + joinedAt
+    // Fill the cache with the same rows used for ranking (name + joinedAt
     // included, so the meta hash carries the tie-break inputs). A Redis
     // failure is swallowed inside the cache — the ranked DB result is
     // returned regardless.

@@ -15,6 +15,7 @@ import { UserProfilePasswordHashNullable1788307500000 } from '../../migrations/1
 import { StepEntrySchema1788307600000 } from '../../migrations/1788307600000-StepEntrySchema';
 import { StepEntry } from '../steps/entities/step-entry.entity';
 import { ChallengesModule } from './challenges.module';
+import { DEFAULT_REDIS_URL } from './redis.provider';
 
 // supertest types every response body as `any`; these shadow types keep the
 // flow fully typed so the repo's no-unsafe-* lint rules stay green. The
@@ -151,15 +152,12 @@ describe.skipIf(!runIntegration)(
 
       // Probe Redis once (REDIS_URL from .env, never printed). retryStrategy
       // null so an unreachable Redis fails fast instead of retrying.
-      const probe = new Redis(
-        process.env.REDIS_URL ?? 'redis://localhost:6379',
-        {
-          lazyConnect: true,
-          connectTimeout: 1000,
-          maxRetriesPerRequest: 1,
-          retryStrategy: () => null,
-        },
-      );
+      const probe = new Redis(process.env.REDIS_URL ?? DEFAULT_REDIS_URL, {
+        lazyConnect: true,
+        connectTimeout: 1000,
+        maxRetriesPerRequest: 1,
+        retryStrategy: () => null,
+      });
       try {
         await probe.connect();
         redisAvailable = (await probe.ping()) === 'PONG';
