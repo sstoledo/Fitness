@@ -295,5 +295,27 @@ describe('StepsController (e2e contract)', () => {
         entries: [{ date: '2026-09-14', steps: 2147483647 }],
       });
     });
+
+    it('rejects a batch over the 31-entry limit with 400 and accepts 31', async () => {
+      // Unique dates across months so the duplicate-date rule does not fire.
+      const makeEntries = (count: number) =>
+        Array.from({ length: count }, (_, i) => {
+          const month = String(Math.floor(i / 28) + 1).padStart(2, '0');
+          const day = String((i % 28) + 1).padStart(2, '0');
+          return { date: `2026-${month}-${day}`, steps: 100 };
+        });
+
+      await request(app)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({ entries: makeEntries(32) })
+        .expect(400);
+
+      await request(app)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({ entries: makeEntries(31) })
+        .expect(200);
+    });
   });
 });

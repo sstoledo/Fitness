@@ -1,5 +1,6 @@
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsInt,
@@ -26,7 +27,9 @@ export class IsCalendarDateConstraint implements ValidatorConstraintInterface {
     if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
       return false;
     }
-    const [year, month, day] = value.split('-').map(Number);
+    const year = Number(value.slice(0, 4));
+    const month = Number(value.slice(5, 7));
+    const day = Number(value.slice(8, 10));
     const parsed = new Date(Date.UTC(year, month - 1, day));
     return (
       parsed.getUTCFullYear() === year &&
@@ -73,6 +76,9 @@ export class StepSyncEntryDto {
 export class StepSyncBatchDto {
   @IsArray()
   @ArrayMinSize(1)
+  // Mirrors the contract's .max(31): a month of daily syncs; bigger batches
+  // only mean abuse or a bug, and would bloat the upsert + read-back query.
+  @ArrayMaxSize(31)
   @ValidateNested({ each: true })
   @Type(() => StepSyncEntryDto)
   entries!: StepSyncEntryDto[];

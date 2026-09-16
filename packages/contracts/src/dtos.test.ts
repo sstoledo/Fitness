@@ -139,6 +139,23 @@ describe("StepSyncBatchDtoSchema", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("accepts 31 entries and rejects 32 (batch size limit)", () => {
+    // Spread dates across months so every entry is unique (the duplicate-date
+    // rule must not interfere with the size assertion).
+    const makeUniqueEntries = (count: number) =>
+      Array.from({ length: count }, (_, i) => {
+        const month = String(Math.floor(i / 28) + 1).padStart(2, "0");
+        const day = String((i % 28) + 1).padStart(2, "0");
+        return { date: `2026-${month}-${day}`, steps: 100 };
+      });
+    expect(
+      StepSyncBatchDtoSchema.safeParse({ entries: makeUniqueEntries(31) }).success,
+    ).toBe(true);
+    expect(
+      StepSyncBatchDtoSchema.safeParse({ entries: makeUniqueEntries(32) }).success,
+    ).toBe(false);
+  });
 });
 
 describe("LeaderboardEntryDtoSchema", () => {

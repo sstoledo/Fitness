@@ -59,7 +59,10 @@ export const StepSyncBatchDtoSchema = z.object({
           // Round-trip check: rejects impossible calendar dates such as
           // 2026-02-30 or 2026-99-99 that the regex alone would accept.
           .refine((value) => {
-            const [year, month, day] = value.split("-").map(Number);
+            // Slice (not destructure) so noUncheckedIndexedAccess stays happy.
+            const year = Number(value.slice(0, 4));
+            const month = Number(value.slice(5, 7));
+            const day = Number(value.slice(8, 10));
             const parsed = new Date(Date.UTC(year, month - 1, day));
             return (
               parsed.getUTCFullYear() === year &&
@@ -73,7 +76,10 @@ export const StepSyncBatchDtoSchema = z.object({
     )
     // Duplicate dates within one batch would hit the same ON CONFLICT target
     // twice in a single statement (Postgres cardinality error) — reject early.
+    // Max 31 entries: a month of daily syncs; bigger batches only mean abuse
+    // or a bug, and would bloat the upsert + read-back IN(...) query.
     .min(1)
+    .max(31)
     .superRefine((entries, ctx) => {
       const seen = new Set<string>();
       for (const entry of entries) {
