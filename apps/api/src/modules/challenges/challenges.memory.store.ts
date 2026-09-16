@@ -11,13 +11,24 @@ import {
   type CreateInviteInput,
   type InviteRecord,
   type JoinChallengeResult,
+  type LeaderboardEntryRecord,
   type StepSyncEntryInput,
 } from './challenges.store';
+import { rankLeaderboard, type LeaderboardRow } from './leaderboard.ranking';
 import { generateInviteToken } from './invite-token';
 
 interface MemoryMembership {
   userId: string;
   role: 'owner' | 'member';
+  /** ms epoch at join/create time — leaderboard tie-break (earliest first). */
+  joinedAt: number;
+  /**
+   * Display name. The memory flavour is test-only and has no user-profile
+   * table, so the bearer-token user id doubles as the name (the test guard
+   * trusts any bearer and uses it as the session user id). The TypeORM
+   * flavour joins the real `user` table instead.
+   */
+  name: string;
 }
 
 interface MemoryInvite {
@@ -30,8 +41,13 @@ interface MemoryInvite {
 interface MemoryChallengeRow {
   record: ChallengeRecord;
   memberships: MemoryMembership[];
-  /** Daily step entries keyed by YYYY-MM-DD (idempotent upsert target). */
-  stepsByDate: Map<string, number>;
+  /**
+   * Daily step entries per member: userId → (YYYY-MM-DD → steps). The shape
+   * is per-user (not per-challenge) because the step count belongs to a
+   * (user, challenge, date) triple — one user's sync must never overwrite
+   * another member's entry for the same date (latent bug fixed in #13).
+   */
+  stepsByUser: Map<string, Map<string, number>>;
 }
 
 /**
@@ -74,8 +90,15 @@ export class InMemoryChallengesStore extends ChallengesStore {
     };
     this.challenges.set(record.id, {
       record,
-      memberships: [{ userId: input.createdBy, role: 'owner' }],
-      stepsByDate: new Map(),
+      memberships: [
+        {
+          userId: input.createdBy,
+          role: 'owner',
+          joinedAt: Date.now(),
+          name: input.createdBy,
+        },
+      ],
+      stepsByUser: new Map(),
     });
     return record;
   }
@@ -134,7 +157,12 @@ export class InMemoryChallengesStore extends ChallengesStore {
       return { ok: false, reason: 'full' };
     }
 
-    row.memberships.push({ userId: input.userId, role: 'member' });
+    row.memberships.push({
+      userId: input.userId,
+      role: 'member',
+      joinedAt: Date.now(),
+      name: input.userId,
+    });
     row.record.memberCount = row.memberships.length;
     invite.status = 'accepted';
     return { ok: true, challenge: row.record };
@@ -153,14 +181,43 @@ export class InMemoryChallengesStore extends ChallengesStore {
       );
     }
     for (const entry of entries) {
-      row.stepsByDate.set(entry.date, entry.steps);
+      let userSteps = row.stepsByUser.get(userId);
+      if (!userSteps) {
+        userSteps = new Map();
+        row.stepsByUser.set(userId, userSteps);
+      }
+      userSteps.set(entry.date, entry.steps);
     }
     return {
       entries: entries.map((entry) => ({
         date: entry.date,
-        steps: row.stepsByDate.get(entry.date) ?? entry.steps,
+        steps: row.stepsByUser.get(userId)?.get(entry.date) ?? entry.steps,
       })),
     };
+  }
+
+  async getDailyLeaderboard(
+    userId: string,
+    challengeId: string,
+    date: string,
+  ): Promise<LeaderboardEntryRecord[]> {
+    const row = this.challenges.get(challengeId);
+    // Unknown challenge id is not a membership either: same 403 semantics as
+    // syncSteps.
+    if (!row || !row.memberships.some((m) => m.userId === userId)) {
+      throw new ForbiddenException(
+        'Only members can view the leaderboard of a challenge.',
+      );
+    }
+
+    // Every member appears, even without a step entry for the date (steps 0).
+    const rows: LeaderboardRow[] = row.memberships.map((membership) => ({
+      userId: membership.userId,
+      name: membership.name,
+      steps: row.stepsByUser.get(membership.userId)?.get(date) ?? 0,
+      joinedAt: membership.joinedAt,
+    }));
+    return rankLeaderboard(rows);
   }
 
   /**
@@ -209,12 +266,14 @@ export class InMemoryChallengesStore extends ChallengesStore {
       (_, i) => ({
         userId: `fixture-member-${i + 1}`,
         role: i === 0 ? 'owner' : 'member',
+        joinedAt: now + i,
+        name: `fixture-member-${i + 1}`,
       }),
     );
     const row: MemoryChallengeRow = {
       record,
       memberships,
-      stepsByDate: new Map(),
+      stepsByUser: new Map(),
     };
     this.challenges.set(challengeId, row);
     return row;

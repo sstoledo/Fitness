@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsInt,
+  IsOptional,
   IsString,
   Matches,
   Max,
@@ -82,4 +83,18 @@ export class StepSyncBatchDto {
   @ValidateNested({ each: true })
   @Type(() => StepSyncEntryDto)
   entries!: StepSyncEntryDto[];
+}
+
+/**
+ * Query string of GET /api/challenges/:id/leaderboard (issue #13).
+ *
+ * `date` is optional: omitted means the server's current UTC calendar day.
+ * The same calendar-validity rules as the sync payload apply (@Matches shape
+ * plus @IsCalendarDate real-date check).
+ */
+export class LeaderboardQueryDto {
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  @IsCalendarDate()
+  date?: string;
 }

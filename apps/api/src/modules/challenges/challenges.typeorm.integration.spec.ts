@@ -44,6 +44,12 @@ interface InviteResponseBody {
 interface StepSyncResponseBody {
   entries: { date: string; steps: number }[];
 }
+interface LeaderboardEntryBody {
+  userId: string;
+  name: string;
+  steps: number;
+  rank: number;
+}
 interface ErrorMessageBody {
   message: string | string[];
 }
@@ -369,9 +375,9 @@ describe.skipIf(!runIntegration)(
 
       // Impossible calendar date: valid for Postgres only after a 400 from
       // validation — the regex alone accepted it before the fix.
-      const impossible = (await sync([{ date: '2026-02-30', steps: 100 }]).expect(
-        400,
-      )) as unknown as SuperResponse<ErrorMessageBody>;
+      const impossible = (await sync([
+        { date: '2026-02-30', steps: 100 },
+      ]).expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
       expect(impossible.body.message).toEqual(expect.any(Array));
 
       // Steps overflow past the PostgreSQL int maximum.
@@ -425,7 +431,11 @@ describe.skipIf(!runIntegration)(
       // to move it forward — deterministic, no sleeps.
       const past = new Date('2020-01-01T00:00:00.000Z');
       await stepEntries.update(
-        { userId: daveDomainId, challengeId: Number(challengeId), date: syncDate },
+        {
+          userId: daveDomainId,
+          challengeId: Number(challengeId),
+          date: syncDate,
+        },
         { syncedAt: past },
       );
 
@@ -442,6 +452,116 @@ describe.skipIf(!runIntegration)(
       });
       expect(row.steps).toBe(4000);
       expect(row.syncedAt.getTime()).toBeGreaterThan(past.getTime());
+    });
+
+    it('ranks members on the daily leaderboard, with real user names and 403 for non-members', async () => {
+      // 1. Owner (Alice) and member (Bob) register; a third user stays a
+      //    non-member to prove the 403 on the leaderboard read.
+      const aliceEmail = `integration-leaderboard-alice-${runId}@example.com`;
+      const alice = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({
+          name: 'Integration Leaderboard Alice',
+          email: aliceEmail,
+          password,
+        })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const aliceToken = alice.body.token;
+
+      const bobEmail = `integration-leaderboard-bob-${runId}@example.com`;
+      const bob = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({
+          name: 'Integration Leaderboard Bob',
+          email: bobEmail,
+          password,
+        })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const bobToken = bob.body.token;
+
+      const strangerEmail = `integration-leaderboard-stranger-${runId}@example.com`;
+      const stranger = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({
+          name: 'Integration Leaderboard Stranger',
+          email: strangerEmail,
+          password,
+        })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const strangerToken = stranger.body.token;
+
+      // 2. Alice creates the challenge and invites Bob, who joins.
+      const created = (await request(httpServer)
+        .post('/api/challenges')
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({
+          name: `Integration Leaderboard Challenge ${runId}`,
+          type: 'step',
+          startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          endDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      const challengeId = created.body.challenge.id;
+      const aliceDomainId = created.body.challenge.createdBy;
+
+      const invite = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/invites`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ inviteeEmail: bobEmail })
+        .expect(201)) as unknown as SuperResponse<InviteResponseBody>;
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/join`)
+        .set('Authorization', `Bearer ${bobToken}`)
+        .send({ inviteToken: invite.body.invite.token })
+        .expect(200);
+
+      // 3. Both sync steps for the same date — Bob walks more than Alice.
+      const syncDate = '2026-09-16';
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ entries: [{ date: syncDate, steps: 4000 }] })
+        .expect(200);
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${bobToken}`)
+        .send({ entries: [{ date: syncDate, steps: 9000 }] })
+        .expect(200);
+
+      // 4. The non-member is rejected before any ranking happens.
+      const forbidden = (await request(httpServer)
+        .get(`/api/challenges/${challengeId}/leaderboard?date=${syncDate}`)
+        .set('Authorization', `Bearer ${strangerToken}`)
+        .expect(403)) as unknown as SuperResponse<ErrorMessageBody>;
+      expect(forbidden.body.message).toMatch(/member/i);
+
+      // 5. Alice reads the leaderboard: bare array, Bob first (rank 1), and
+      //    the names come from the domain user profile (proves the
+      //    UserProfile INNER JOIN, not the auth session).
+      const leaderboard = (await request(httpServer)
+        .get(`/api/challenges/${challengeId}/leaderboard?date=${syncDate}`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .expect(200)) as unknown as SuperResponse<LeaderboardEntryBody[]>;
+
+      expect(leaderboard.body).toHaveLength(2);
+      const [first, second] = leaderboard.body;
+      // Bob walked more: rank 1. His userId is his own numeric domain id as
+      // a string (not Alice's) and the name comes from the domain user
+      // profile (proves the UserProfile INNER JOIN, not the auth session).
+      expect(first).toMatchObject({
+        name: 'Integration Leaderboard Bob',
+        steps: 9000,
+        rank: 1,
+      });
+      expect(typeof first?.userId).toBe('string');
+      expect(Number(first?.userId)).toBeGreaterThan(0);
+      expect(first?.userId).not.toBe(String(aliceDomainId));
+      expect(second).toEqual({
+        userId: String(aliceDomainId),
+        name: 'Integration Leaderboard Alice',
+        steps: 4000,
+        rank: 2,
+      });
     });
   },
 );
