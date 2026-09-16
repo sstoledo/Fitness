@@ -63,6 +63,13 @@ export type JoinChallengeResult =
   | { ok: true; challenge: ChallengeRecord }
   | { ok: false; reason: 'not-invited' | 'full' };
 
+/** One daily step row the client wants to upsert (docs CUT-1-BACKEND.md 2.5). */
+export interface StepSyncEntryInput {
+  /** YYYY-MM-DD calendar day, as posted by the mobile client. */
+  date: string;
+  steps: number;
+}
+
 export abstract class ChallengesStore {
   abstract createChallenge(
     input: CreateChallengeInput,
@@ -87,4 +94,21 @@ export abstract class ChallengesStore {
     userId: string;
     inviteToken: string;
   }): Promise<JoinChallengeResult>;
+
+  /**
+   * Idempotently upserts daily step entries for a member (docs
+   * CUT-1-BACKEND.md 2.5/2.6). One row per (userId, challengeId, date):
+   * the TypeORM implementation relies on the
+   * `stepEntry_user_challenge_date_uq` unique constraint (ON CONFLICT),
+   * never on application-level duplicate checks. Non-members get a 403
+   * (same authorization semantics as the 403 on joinChallenge).
+   *
+   * Returns the stored values after the upsert, in input order, so the API
+   * response echoes exactly what is persisted.
+   */
+  abstract syncSteps(
+    userId: string,
+    challengeId: string,
+    entries: StepSyncEntryInput[],
+  ): Promise<{ entries: { date: string; steps: number }[] }>;
 }

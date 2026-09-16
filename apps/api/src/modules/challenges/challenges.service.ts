@@ -5,7 +5,7 @@ import {
   Injectable,
 } from '@nestjs/common';
 import type { AuthSessionUser } from '../auth/session.guard';
-import { ChallengesStore } from './challenges.store';
+import { ChallengesStore, type StepSyncEntryInput } from './challenges.store';
 
 /**
  * Wire shape of `ChallengeDto` from `@fitness/contracts`. The api does not
@@ -100,6 +100,33 @@ export class ChallengesService {
       throw new ForbiddenException('You are not invited to this challenge.');
     }
     return this.toDto(result.challenge);
+  }
+
+  /**
+   * Idempotent daily step sync (docs CUT-1-BACKEND.md 2.5/2.6) — thin
+   * passthrough to the store, which owns the membership check (403) and the
+   * constraint-guaranteed upsert.
+   *
+   * Duplicate dates within one batch are rejected here (not in the DTO) so
+   * the rule also holds if the DTO layer is ever bypassed; two rows touching
+   * the same ON CONFLICT target in one statement would otherwise surface as
+   * a Postgres cardinality error (500) instead of a client error.
+   */
+  async syncSteps(
+    userId: string,
+    challengeId: string,
+    entries: StepSyncEntryInput[],
+  ): Promise<{ entries: { date: string; steps: number }[] }> {
+    const seenDates = new Set<string>();
+    for (const entry of entries) {
+      if (seenDates.has(entry.date)) {
+        throw new BadRequestException(
+          'Duplicate dates are not allowed in a step sync batch.',
+        );
+      }
+      seenDates.add(entry.date);
+    }
+    return this.store.syncSteps(userId, challengeId, entries);
   }
 
   private toDto(record: {

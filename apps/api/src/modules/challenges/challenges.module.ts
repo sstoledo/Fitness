@@ -7,10 +7,12 @@ import { ChallengesService } from './challenges.service';
 import { ChallengesStore } from './challenges.store';
 import { TypeOrmChallengesStore } from './challenges.typeorm.store';
 import { DomainUserMapper } from './domain-user.mapper';
+import { StepsController } from './steps.controller';
 import { Challenge } from './entities/challenge.entity';
 import { Invite } from './entities/invite.entity';
 import { Membership } from './entities/membership.entity';
 import { UserProfile } from './entities/user-profile.entity';
+import { StepEntry } from '../steps/entities/step-entry.entity';
 
 export const CHALLENGE_ENTITIES = [Challenge, Membership, Invite, UserProfile];
 
@@ -41,7 +43,7 @@ export interface ChallengesModuleOptions {
  * `synchronize: false` always.
  */
 @Module({
-  controllers: [ChallengesController],
+  controllers: [ChallengesController, StepsController],
   providers: [
     ChallengesService,
     ChallengesAuthGuard,
@@ -61,7 +63,7 @@ export class ChallengesModule {
       // is marked global by AppModule, so the single postgres-backed
       // BETTER_AUTH provider is visible from this module scope (and the
       // memory instance of the plain AuthModule class no longer shadows it).
-      imports: [TypeOrmModule.forFeature(CHALLENGE_ENTITIES)],
+      imports: [TypeOrmModule.forFeature([...CHALLENGE_ENTITIES, StepEntry])],
       providers: [
         {
           provide: ChallengesStore,
