@@ -53,11 +53,40 @@ export const StepSyncBatchDtoSchema = z.object({
   entries: z
     .array(
       z.object({
-        date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD"),
-        steps: z.number().int().nonnegative(),
+        date: z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, "date must be YYYY-MM-DD")
+          // Round-trip check: rejects impossible calendar dates such as
+          // 2026-02-30 or 2026-99-99 that the regex alone would accept.
+          .refine((value) => {
+            const [year, month, day] = value.split("-").map(Number);
+            const parsed = new Date(Date.UTC(year, month - 1, day));
+            return (
+              parsed.getUTCFullYear() === year &&
+              parsed.getUTCMonth() === month - 1 &&
+              parsed.getUTCDate() === day
+            );
+          }, "date must be a real calendar date"),
+        // 2147483647 is the PostgreSQL int maximum for the steps column.
+        steps: z.number().int().nonnegative().max(2147483647),
       }),
     )
-    .min(1),
+    // Duplicate dates within one batch would hit the same ON CONFLICT target
+    // twice in a single statement (Postgres cardinality error) — reject early.
+    .min(1)
+    .superRefine((entries, ctx) => {
+      const seen = new Set<string>();
+      for (const entry of entries) {
+        if (seen.has(entry.date)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Duplicate date '${entry.date}' in step sync batch.`,
+          });
+          return;
+        }
+        seen.add(entry.date);
+      }
+    }),
 });
 export type StepSyncBatchDto = z.infer<typeof StepSyncBatchDtoSchema>;
 

@@ -331,5 +331,117 @@ describe.skipIf(!runIntegration)(
       expect(rows).toHaveLength(1);
       expect(rows[0].steps).toBe(7000);
     });
+
+    it('rejects duplicate dates, impossible dates and steps overflow with 400', async () => {
+      const carolEmail = `integration-steps-carol-${runId}@example.com`;
+      const carol = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Steps Carol', email: carolEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const carolToken = carol.body.token;
+
+      const created = (await request(httpServer)
+        .post('/api/challenges')
+        .set('Authorization', `Bearer ${carolToken}`)
+        .send({
+          name: `Integration Validation Challenge ${runId}`,
+          type: 'step',
+          startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          endDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      const challengeId = created.body.challenge.id;
+
+      const sync = (entries: { date: string; steps: number }[]) =>
+        request(httpServer)
+          .post(`/api/challenges/${challengeId}/steps`)
+          .set('Authorization', `Bearer ${carolToken}`)
+          .send({ entries });
+
+      // Duplicate dates in one batch would hit the same ON CONFLICT target
+      // twice in a single statement (Postgres cardinality error → 500) — the
+      // service must reject them with 400 before reaching the store.
+      const duplicate = (await sync([
+        { date: '2026-09-10', steps: 5000 },
+        { date: '2026-09-10', steps: 7000 },
+      ]).expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
+      expect(duplicate.body.message).toMatch(/duplicate dates/i);
+
+      // Impossible calendar date: valid for Postgres only after a 400 from
+      // validation — the regex alone accepted it before the fix.
+      const impossible = (await sync([{ date: '2026-02-30', steps: 100 }]).expect(
+        400,
+      )) as unknown as SuperResponse<ErrorMessageBody>;
+      expect(impossible.body.message).toEqual(expect.any(Array));
+
+      // Steps overflow past the PostgreSQL int maximum.
+      const overflow = (await sync([
+        { date: '2026-09-10', steps: 2147483648 },
+      ]).expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
+      expect(overflow.body.message).toEqual(expect.any(Array));
+
+      // Boundary value is accepted and persisted.
+      const boundary = (await sync([
+        { date: '2026-09-10', steps: 2147483647 },
+      ]).expect(200)) as unknown as SuperResponse<StepSyncResponseBody>;
+      expect(boundary.body).toEqual({
+        entries: [{ date: '2026-09-10', steps: 2147483647 }],
+      });
+    });
+
+    it('refreshes syncedAt on conflict (upsert updates the timestamp)', async () => {
+      const daveEmail = `integration-steps-dave-${runId}@example.com`;
+      const dave = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Steps Dave', email: daveEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const daveToken = dave.body.token;
+
+      const created = (await request(httpServer)
+        .post('/api/challenges')
+        .set('Authorization', `Bearer ${daveToken}`)
+        .send({
+          name: `Integration SyncedAt Challenge ${runId}`,
+          type: 'step',
+          startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          endDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      const challengeId = created.body.challenge.id;
+      const daveDomainId = Number(created.body.challenge.createdBy);
+
+      const stepEntries = moduleRef.get<Repository<StepEntry>>(
+        getRepositoryToken(StepEntry),
+      );
+      const syncDate = '2026-09-15';
+
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${daveToken}`)
+        .send({ entries: [{ date: syncDate, steps: 3000 }] })
+        .expect(200);
+
+      // Force the stored timestamp into the clearly-past so the re-sync has
+      // to move it forward — deterministic, no sleeps.
+      const past = new Date('2020-01-01T00:00:00.000Z');
+      await stepEntries.update(
+        { userId: daveDomainId, challengeId: Number(challengeId), date: syncDate },
+        { syncedAt: past },
+      );
+
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${daveToken}`)
+        .send({ entries: [{ date: syncDate, steps: 4000 }] })
+        .expect(200);
+
+      const row = await stepEntries.findOneByOrFail({
+        userId: daveDomainId,
+        challengeId: Number(challengeId),
+        date: syncDate,
+      });
+      expect(row.steps).toBe(4000);
+      expect(row.syncedAt.getTime()).toBeGreaterThan(past.getTime());
+    });
   },
 );

@@ -244,5 +244,56 @@ describe('StepsController (e2e contract)', () => {
         { date: '2026-09-13', steps: 3000 },
       ]);
     });
+
+    it('rejects duplicate dates within one batch with 400', async () => {
+      const response = (await request(app)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({
+          entries: [
+            { date: '2026-09-10', steps: 5000 },
+            { date: '2026-09-10', steps: 7000 },
+          ],
+        })
+        .expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
+
+      expect(response.body.message).toMatch(/duplicate dates/i);
+    });
+
+    it('rejects impossible calendar dates with 400', async () => {
+      for (const date of ['2026-02-30', '2026-99-99']) {
+        const response = (await request(app)
+          .post(`/api/challenges/${challengeId}/steps`)
+          .set('Authorization', memberBearer)
+          .send({ entries: [{ date, steps: 100 }] })
+          .expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
+
+        expect(response.body.message).toEqual(expect.any(Array));
+        expect(response.body.message.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('rejects steps above the PostgreSQL int max with 400', async () => {
+      const response = (await request(app)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({ entries: [{ date: '2026-09-10', steps: 2147483648 }] })
+        .expect(400)) as unknown as SuperResponse<ErrorMessageBody>;
+
+      expect(response.body.message).toEqual(expect.any(Array));
+      expect(response.body.message.length).toBeGreaterThan(0);
+    });
+
+    it('accepts steps at the PostgreSQL int boundary with 200', async () => {
+      const response = (await request(app)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', memberBearer)
+        .send({ entries: [{ date: '2026-09-14', steps: 2147483647 }] })
+        .expect(200)) as unknown as SuperResponse<StepSyncResponseBody>;
+
+      expect(response.body).toEqual({
+        entries: [{ date: '2026-09-14', steps: 2147483647 }],
+      });
+    });
   });
 });
