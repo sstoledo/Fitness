@@ -196,12 +196,16 @@ export class TypeOrmChallengesStore extends ChallengesStore {
     // Idempotency is guaranteed by the stepEntry_user_challenge_date_uq
     // unique constraint: PostgreSQL ON CONFLICT (userId, challengeId, date)
     // DO UPDATE — repeated syncs never create duplicates (docs 2.5/2.6).
+    // syncedAt is set explicitly so the ON CONFLICT branch refreshes it too
+    // (the column default only applies on INSERT).
+    const syncedAt = new Date();
     await this.stepEntries.upsert(
       entries.map((entry) => ({
         userId: numericUserId,
         challengeId: numericChallengeId,
         date: entry.date,
         steps: entry.steps,
+        syncedAt,
       })),
       ['userId', 'challengeId', 'date'],
     );

@@ -5,9 +5,50 @@ import {
   IsInt,
   IsString,
   Matches,
+  Max,
   Min,
+  registerDecorator,
   ValidateNested,
+  ValidatorConstraint,
+  type ValidationArguments,
+  type ValidatorConstraintInterface,
 } from 'class-validator';
+
+/**
+ * Rejects strings that look like YYYY-MM-DD but name an impossible calendar
+ * date (e.g. 2026-02-30 or 2026-99-99) — the @Matches regex alone cannot tell.
+ * Same round-trip rule as the contract's `.refine()` in
+ * `@fitness/contracts` (`StepSyncBatchDtoSchema`).
+ */
+@ValidatorConstraint({ name: 'IsCalendarDate' })
+export class IsCalendarDateConstraint implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return false;
+    }
+    const [year, month, day] = value.split('-').map(Number);
+    const parsed = new Date(Date.UTC(year, month - 1, day));
+    return (
+      parsed.getUTCFullYear() === year &&
+      parsed.getUTCMonth() === month - 1 &&
+      parsed.getUTCDate() === day
+    );
+  }
+
+  defaultMessage(_args: ValidationArguments): string {
+    return 'date must be a real calendar date (YYYY-MM-DD)';
+  }
+}
+
+export function IsCalendarDate() {
+  return function (object: object, propertyName: string) {
+    registerDecorator({
+      target: object.constructor,
+      propertyName,
+      validator: IsCalendarDateConstraint,
+    });
+  };
+}
 
 /**
  * HTTP payload for the steps sync endpoint (issue #12).
@@ -19,10 +60,13 @@ import {
 export class StepSyncEntryDto {
   @IsString()
   @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  @IsCalendarDate()
   date!: string;
 
   @IsInt()
   @Min(0)
+  // 2147483647 is the PostgreSQL int maximum for the steps column.
+  @Max(2147483647)
   steps!: number;
 }
 

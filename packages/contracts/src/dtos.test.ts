@@ -108,6 +108,37 @@ describe("StepSyncBatchDtoSchema", () => {
     ).toBe(false);
     expect(StepSyncBatchDtoSchema.safeParse({ entries: [] }).success).toBe(false);
   });
+
+  it("accepts steps at the PostgreSQL int boundary and rejects the overflow", () => {
+    expect(
+      StepSyncBatchDtoSchema.safeParse({ entries: [{ date: "2026-09-01", steps: 2147483647 }] })
+        .success,
+    ).toBe(true);
+    expect(
+      StepSyncBatchDtoSchema.safeParse({ entries: [{ date: "2026-09-01", steps: 2147483648 }] })
+        .success,
+    ).toBe(false);
+  });
+
+  it("rejects impossible calendar dates", () => {
+    expect(
+      StepSyncBatchDtoSchema.safeParse({ entries: [{ date: "2026-02-30", steps: 1 }] }).success,
+    ).toBe(false);
+    expect(
+      StepSyncBatchDtoSchema.safeParse({ entries: [{ date: "2026-99-99", steps: 1 }] }).success,
+    ).toBe(false);
+  });
+
+  it("rejects duplicate dates within one batch", () => {
+    expect(
+      StepSyncBatchDtoSchema.safeParse({
+        entries: [
+          { date: "2026-09-10", steps: 5000 },
+          { date: "2026-09-10", steps: 7000 },
+        ],
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("LeaderboardEntryDtoSchema", () => {
