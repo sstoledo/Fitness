@@ -138,8 +138,9 @@ export class TypeOrmChallengesStore extends ChallengesStore {
   }): Promise<JoinChallengeResult> {
     const challengeId = this.toNumericId(input.challengeId);
     const userId = this.toNumericId(input.userId);
+    let freshJoin = false;
 
-    return this.dataSource.transaction(
+    const result = await this.dataSource.transaction(
       async (em): Promise<JoinChallengeResult> => {
         const memberships = em.getRepository(Membership);
         const invites = em.getRepository(Invite);
@@ -174,20 +175,27 @@ export class TypeOrmChallengesStore extends ChallengesStore {
           memberships.create({ userId, challengeId, role: 'member' }),
         );
         await invites.update(invite.id, { status: 'accepted' });
-        // A new member changes the daily leaderboard roster: drop every
-        // cached key for the challenge so the next GET rehydrates from the
-        // DB with this member included (a stale zset would silently omit
-        // them until the 48h TTL expired or they synced steps). Best-effort
-        // — Redis errors are swallowed inside the cache; the idempotent
-        // re-join path above intentionally skips this, no cache churn when
-        // nothing changed.
-        await this.cache.invalidateChallenge(challengeId);
+        freshJoin = true;
         return {
           ok: true,
           challenge: this.toRecord(challenge, memberCount + 1),
         };
       },
     );
+
+    // A new member changes the daily leaderboard roster: drop every cached
+    // key for the challenge so the next GET rehydrates from the DB with this
+    // member included (a stale zset would silently omit them until the 48h
+    // TTL expired). The invalidation runs AFTER the transaction commits —
+    // inside the callback a concurrent GET could rehydrate from the
+    // pre-join roster and cache it for 48h (PR #28 review). Best-effort:
+    // Redis errors are swallowed inside the cache; the idempotent re-join
+    // path above intentionally skips this, no cache churn when nothing
+    // changed.
+    if (freshJoin) {
+      await this.cache.invalidateChallenge(challengeId);
+    }
+    return result;
   }
 
   async syncSteps(
@@ -240,25 +248,19 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       steps: stepsByDate.get(entry.date) ?? entry.steps,
     }));
 
-    // Write-through to the leaderboard cache (issue #13, PR-B): one batched
-    // call keeps every already-hydrated daily zset in sync without waiting
-    // for the next GET. The cache only updates EXISTING keys, in two Redis
-    // round-trips for the whole payload (probe + write); on any Redis error
-    // updateScores is a swallowed no-op and the next GET rehydrates from the
-    // DB. The profile lookup inside resolveName runs lazily — only when the
-    // batch actually needs a missing meta field, so a cold cache never pays
-    // the extra query.
-    await this.cache.updateScores({
-      challengeId: numericChallengeId,
-      userId: String(numericUserId),
-      joinedAtMs: membership.joinedAt.getTime(),
-      entries: syncedEntries.map((entry) => ({
-        date: entry.date,
-        steps: entry.steps,
-      })),
-      resolveName: async () =>
-        (await this.users.findOneBy({ id: numericUserId }))?.name ?? '',
-    });
+    // Invalidation-based write-through to the leaderboard cache (issue #13,
+    // PR-B; PR #28 review): syncs NEVER write scores to Redis — that would
+    // race with concurrent syncs committing PG in one order and writing
+    // Redis in the reverse order. Instead the synced dates' cache keys are
+    // dropped and their per-date versions bumped atomically, so the next GET
+    // rehydrates from the just-committed Postgres state and any hydration
+    // already in flight aborts on its version check. On any Redis error
+    // invalidateDates is a swallowed no-op and the next GET still rehydrates
+    // from the DB.
+    await this.cache.invalidateDates(
+      numericChallengeId,
+      syncedEntries.map((entry) => entry.date),
+    );
 
     return { entries: syncedEntries };
   }
@@ -330,10 +332,18 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       joinedAt: row.joinedAt,
     }));
     // Fill the cache with the same rows used for ranking (name + joinedAt
-    // included, so the meta hash carries the tie-break inputs). A Redis
-    // failure is swallowed inside the cache — the ranked DB result is
+    // included, so the meta hash carries the tie-break inputs). The fill is
+    // CONDITIONAL (PR #28 review): the version token is read right before
+    // the write and the cache's Lua script re-checks it — a sync or join
+    // landing between the DB read and the write bumps a counter and this
+    // stale snapshot is dropped instead of overwriting fresher state. A
+    // Redis failure is swallowed inside the cache — the ranked DB result is
     // returned regardless.
-    await this.cache.set(numericChallengeId, date, leaderboardRows);
+    const expected = await this.cache.readVersionToken(
+      numericChallengeId,
+      date,
+    );
+    await this.cache.set(numericChallengeId, date, leaderboardRows, expected);
     return rankLeaderboard(leaderboardRows, userId);
   }
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { Logger } from '@nestjs/common';
+import { describe, expect, it, vi } from 'vitest';
 import type Redis from 'ioredis';
 import { LeaderboardCache, LEADERBOARD_TTL_SECONDS } from './leaderboard.cache';
 import type { LeaderboardRow } from './leaderboard.ranking';
@@ -10,14 +11,17 @@ import type { LeaderboardRow } from './leaderboard.ranking';
 
 /**
  * Hand-rolled in-memory fake of the slice of ioredis the cache uses
- * (zadd/zrevrange/hgetall/hset/hexists/expire/exists/del/scan + pipeline).
- * No new dev dependency — the fake keeps the unit suite hermetic and proves
- * the exact Redis semantics the cache relies on (WITHSCORES interleave,
- * EXISTS gating, SCAN glob matches, TTL bookkeeping).
+ * (zadd/zrevrange/hgetall/hset/expire/exists/del/scan/get/incr/eval +
+ * pipeline). No new dev dependency — the fake keeps the unit suite hermetic
+ * and proves the exact Redis semantics the cache relies on (WITHSCORES
+ * interleave, SCAN glob matches, TTL bookkeeping, and the three Lua scripts'
+ * documented semantics, dispatched deterministically via their `@script`
+ * marker comment instead of parsing Lua).
  */
 class FakeRedis {
   readonly zsets = new Map<string, Map<string, number>>();
   readonly hashes = new Map<string, Map<string, string>>();
+  readonly strings = new Map<string, string>();
   readonly ttls = new Map<string, number>();
   /** Number of pipelines built — proves how many round-trips a call costs. */
   pipelineCalls = 0;
@@ -82,18 +86,32 @@ class FakeRedis {
     return isNew ? 1 : 0;
   }
 
-  async hexists(key: string, field: string): Promise<number> {
-    return this.hashes.get(key)?.has(field) ? 1 : 0;
+  async get(key: string): Promise<string | null> {
+    return this.strings.get(key) ?? null;
+  }
+
+  async incr(key: string): Promise<number> {
+    const next = Number(this.strings.get(key) ?? '0') + 1;
+    this.strings.set(key, String(next));
+    return next;
   }
 
   async expire(key: string, seconds: number): Promise<number> {
-    if (!this.zsets.has(key) && !this.hashes.has(key)) return 0;
+    if (
+      !this.zsets.has(key) &&
+      !this.hashes.has(key) &&
+      !this.strings.has(key)
+    ) {
+      return 0;
+    }
     this.ttls.set(key, seconds);
     return 1;
   }
 
   async exists(...keys: string[]): Promise<number> {
-    return keys.filter((k) => this.zsets.has(k) || this.hashes.has(k)).length;
+    return keys.filter(
+      (k) => this.zsets.has(k) || this.hashes.has(k) || this.strings.has(k),
+    ).length;
   }
 
   async del(...keys: string[]): Promise<number> {
@@ -101,16 +119,81 @@ class FakeRedis {
     for (const key of keys) {
       if (this.zsets.delete(key)) removed++;
       if (this.hashes.delete(key)) removed++;
+      if (this.strings.delete(key)) removed++;
       this.ttls.delete(key);
     }
     return removed;
   }
 
   /**
+   * Deterministic stand-in for Redis Lua execution: dispatches on the
+   * `@script` marker comment each script carries and applies the documented
+   * semantics against the in-memory maps. Real Redis runs the actual Lua;
+   * both paths must stay behaviorally identical.
+   */
+  async eval(
+    script: string,
+    numKeys: number,
+    ...args: (string | number)[]
+  ): Promise<unknown> {
+    const keys = args.slice(0, numKeys).map(String);
+    const rest = args.slice(numKeys).map(String);
+
+    if (script.includes('lb_invalidate_dates')) {
+      // KEYS arrive in triples [zset, meta, ver].
+      for (let i = 0; i < keys.length; i += 3) {
+        await this.del(keys[i], keys[i + 1]);
+        await this.incr(keys[i + 2]);
+      }
+      return keys.length / 3;
+    }
+
+    if (script.includes('lb_conditional_set')) {
+      // KEYS = [zset, meta, ver, gen]; ARGV = [ver, gen, ttl, triples...].
+      const [expectedVer, expectedGen, ttl] = rest;
+      const version = Number(this.strings.get(keys[2]) ?? '0');
+      const generation = Number(this.strings.get(keys[3]) ?? '0');
+      if (version !== Number(expectedVer) || generation !== Number(expectedGen)) {
+        return 0;
+      }
+      await this.del(keys[0], keys[1]);
+      let wrote = false;
+      for (let i = 3; i < rest.length; i += 3) {
+        await this.zadd(keys[0], Number(rest[i + 1]), rest[i]);
+        await this.hset(keys[1], rest[i], rest[i + 2]);
+        wrote = true;
+      }
+      if (wrote) {
+        await this.expire(keys[0], Number(ttl));
+        await this.expire(keys[1], Number(ttl));
+      }
+      return 1;
+    }
+
+    if (script.includes('lb_invalidate_batch')) {
+      const bumped = new Set<string>();
+      for (const key of keys) {
+        await this.del(key);
+        const suffix = key.startsWith('lb:meta:') ? key.slice(8) : key.slice(3);
+        const ver = `lb:ver:${suffix}`;
+        if (!bumped.has(ver)) {
+          bumped.add(ver);
+          await this.incr(ver);
+        }
+      }
+      return keys.length;
+    }
+
+    throw new Error(`FakeRedis: unknown Lua script: ${script}`);
+  }
+
+  /**
    * Single-page SCAN: the fake holds few keys, so one page reports every key
    * matching the pattern and closes the cursor ('0') — the cache's cursor
    * loop handles that identically to a multi-page real scan. COUNT is
-   * accepted but ignored, matching real SCAN's "hint, not a guarantee".
+   * accepted but ignored, matching real SCAN's "hint, not a guarantee". Only
+   * payload keys (zsets + hashes) are keyspace-visible to the cache's SCAN:
+   * ver/gen counters never match the `lb:{id}:*` / `lb:meta:{id}:*` globs.
    */
   async scan(
     cursor: number | string,
@@ -151,28 +234,8 @@ class FakePipeline {
 
   constructor(private readonly redis: FakeRedis) {}
 
-  zadd(key: string, score: number, member: string): this {
-    this.commands.push(() => this.redis.zadd(key, score, member));
-    return this;
-  }
-  hset(key: string, field: string, value: string): this {
-    this.commands.push(() => this.redis.hset(key, field, value));
-    return this;
-  }
-  hexists(key: string, field: string): this {
-    this.commands.push(() => this.redis.hexists(key, field));
-    return this;
-  }
-  exists(...keys: string[]): this {
-    this.commands.push(() => this.redis.exists(...keys));
-    return this;
-  }
-  expire(key: string, seconds: number): this {
-    this.commands.push(() => this.redis.expire(key, seconds));
-    return this;
-  }
-  del(...keys: string[]): this {
-    this.commands.push(() => this.redis.del(...keys));
+  get(key: string): this {
+    this.commands.push(() => this.redis.get(key));
     return this;
   }
 
@@ -197,6 +260,11 @@ const CHALLENGE = 7;
 const DATE = '2026-09-16';
 const zkey = `lb:${CHALLENGE}:${DATE}`;
 const mkey = `lb:meta:${CHALLENGE}:${DATE}`;
+const vkey = `lb:ver:${CHALLENGE}:${DATE}`;
+const gkey = `lbgen:${CHALLENGE}`;
+
+/** Fresh-fake counters: no ver/gen keys exist yet, so both read as 0. */
+const TOKEN0 = { version: 0, generation: 0 };
 
 const rows = (...overrides: Partial<LeaderboardRow>[]): LeaderboardRow[] =>
   overrides.map((row, i) => ({
@@ -216,10 +284,15 @@ describe('LeaderboardCache', () => {
   it('round-trips set → get with ranked entries in order', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, [
-      ...rows({ userId: 'u1', name: 'Alice', steps: 4000, joinedAt: 100 }),
-      ...rows({ userId: 'u2', name: 'Bob', steps: 9000, joinedAt: 200 }),
-    ]);
+    await cache.set(
+      CHALLENGE,
+      DATE,
+      [
+        ...rows({ userId: 'u1', name: 'Alice', steps: 4000, joinedAt: 100 }),
+        ...rows({ userId: 'u2', name: 'Bob', steps: 9000, joinedAt: 200 }),
+      ],
+      TOKEN0,
+    );
 
     expect(await cache.get(CHALLENGE, DATE)).toEqual([
       { userId: 'u2', name: 'Bob', steps: 9000, rank: 1, isRequester: false },
@@ -236,11 +309,16 @@ describe('LeaderboardCache', () => {
     // a raw zset read would order u-late before u-early. The cache must
     // re-rank via rankLeaderboard using meta.j — this test proves the
     // tie-break survives the cache round-trip exactly like the DB path.
-    await cache.set(CHALLENGE, DATE, [
-      ...rows({ userId: 'u-late', name: 'Late', steps: 100, joinedAt: 500 }),
-      ...rows({ userId: 'u-early', name: 'Early', steps: 100, joinedAt: 100 }),
-      ...rows({ userId: 'u-mid', name: 'Mid', steps: 300, joinedAt: 300 }),
-    ]);
+    await cache.set(
+      CHALLENGE,
+      DATE,
+      [
+        ...rows({ userId: 'u-late', name: 'Late', steps: 100, joinedAt: 500 }),
+        ...rows({ userId: 'u-early', name: 'Early', steps: 100, joinedAt: 100 }),
+        ...rows({ userId: 'u-mid', name: 'Mid', steps: 300, joinedAt: 300 }),
+      ],
+      TOKEN0,
+    );
 
     const result = await cache.get(CHALLENGE, DATE);
     expect(result?.map((entry) => entry.userId)).toEqual([
@@ -254,10 +332,15 @@ describe('LeaderboardCache', () => {
   it('marks the requester entry when get() is given a requesterUserId', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, [
-      ...rows({ userId: 'u1', name: 'Alice', steps: 4000, joinedAt: 100 }),
-      ...rows({ userId: 'u2', name: 'Bob', steps: 9000, joinedAt: 200 }),
-    ]);
+    await cache.set(
+      CHALLENGE,
+      DATE,
+      [
+        ...rows({ userId: 'u1', name: 'Alice', steps: 4000, joinedAt: 100 }),
+        ...rows({ userId: 'u2', name: 'Bob', steps: 9000, joinedAt: 200 }),
+      ],
+      TOKEN0,
+    );
 
     // Cache hits must carry the PR-A requester contract just like the DB
     // path — a null requester would flip every entry to isRequester: false.
@@ -277,19 +360,19 @@ describe('LeaderboardCache', () => {
   it('treats a member missing from the meta hash as a miss (null)', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }), TOKEN0);
     // Simulate a partially-written key: meta field gone.
     fake.hashes.get(mkey)?.delete('u1');
     expect(await cache.get(CHALLENGE, DATE)).toBeNull();
   });
 
-  it('swallows Redis errors: get returns null, set/updateScores do not throw', async () => {
+  it('swallows Redis errors: get/set/invalidateDates never throw', async () => {
     const fake = new FakeRedis();
-    // A client whose zrevrange/pipeline blow up — everything else delegates
-    // to the healthy fake (updateScores's probe pipeline throws first).
+    // A client whose zrevrange/eval blow up — everything else delegates to
+    // the healthy fake.
     const failing = new Proxy(fake, {
       get(target, prop) {
-        if (prop === 'zrevrange' || prop === 'pipeline') {
+        if (prop === 'zrevrange' || prop === 'eval') {
           return () => {
             throw new Error('redis down');
           };
@@ -301,156 +384,133 @@ describe('LeaderboardCache', () => {
 
     expect(await cache.get(CHALLENGE, DATE)).toBeNull();
     await expect(
-      cache.set(CHALLENGE, DATE, rows({ steps: 1 })),
+      cache.set(CHALLENGE, DATE, rows({ steps: 1 }), TOKEN0),
     ).resolves.toBeUndefined();
     await expect(
-      cache.updateScores({
-        challengeId: CHALLENGE,
-        userId: 'u1',
-        joinedAtMs: 100,
-        entries: [{ date: DATE, steps: 10 }],
-        resolveName: async () => 'One',
-      }),
+      cache.invalidateDates(CHALLENGE, [DATE]),
     ).resolves.toBeUndefined();
   });
 
-  it('updateScores on a cold cache is a no-op: no key created, resolveName never called', async () => {
+  it('invalidateDates removes the daily keys and bumps the per-date version', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    let resolveNameCalls = 0;
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }), TOKEN0);
+    expect(await fake.exists(zkey, mkey)).toBe(2);
 
-    await cache.updateScores({
-      challengeId: CHALLENGE,
-      userId: 'u1',
-      joinedAtMs: 100,
-      entries: [{ date: DATE, steps: 10_000 }],
-      resolveName: async () => {
-        resolveNameCalls += 1;
-        return 'One';
-      },
-    });
+    await cache.invalidateDates(CHALLENGE, [DATE]);
 
-    expect(resolveNameCalls).toBe(0);
-    expect(await fake.exists(zkey)).toBe(0);
-    expect(await fake.exists(mkey)).toBe(0);
-    // One probe round-trip, zero writes — the DB fallback stays untouched.
-    expect(fake.pipelineCalls).toBe(1);
+    // Payload keys gone; the version counter was bumped from nil to 1.
+    expect(await fake.exists(zkey, mkey)).toBe(0);
+    expect(await fake.get(vkey)).toBe('1');
+
+    // A second sync bumps the version again even though no keys existed —
+    // the counter is the guard, not the payload.
+    await cache.invalidateDates(CHALLENGE, [DATE]);
+    expect(await fake.get(vkey)).toBe('2');
   });
 
-  it('updateScores updates existing keys in one batched write and refreshes the TTL', async () => {
+  it('conditional set aborts when the version was bumped after the token was read', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
 
-    // Simulate an aged key, then write through.
-    fake.ttls.set(zkey, 60);
-    fake.ttls.set(mkey, 60);
-    const pipelinesBefore = fake.pipelineCalls;
-    let resolveNameCalls = 0;
+    // Hydration flow: token read → sync lands in between (bumps ver) → set.
+    const staleToken = await cache.readVersionToken(CHALLENGE, DATE);
+    expect(staleToken).toEqual(TOKEN0);
+    await cache.invalidateDates(CHALLENGE, [DATE]);
 
-    await cache.updateScores({
-      challengeId: CHALLENGE,
-      userId: 'u1',
-      joinedAtMs: 9999,
-      entries: [{ date: DATE, steps: 10_000 }],
-      resolveName: async () => {
-        resolveNameCalls += 1;
-        return 'User 1';
-      },
-    });
+    // The stale hydration is dropped: no keys written at all.
+    await cache.set(
+      CHALLENGE,
+      DATE,
+      rows({ userId: 'u1', steps: 100 }),
+      staleToken,
+    );
+    expect(await fake.exists(zkey, mkey)).toBe(0);
 
-    expect((await fake.zrevrange(zkey, 0, -1, 'WITHSCORES'))[1]).toBe('10000');
-    expect(fake.ttls.get(zkey)).toBe(LEADERBOARD_TTL_SECONDS);
-    expect(fake.ttls.get(mkey)).toBe(LEADERBOARD_TTL_SECONDS);
-    // Meta was already present → original joinedAt preserved, no profile query.
-    const meta = JSON.parse(fake.hashes.get(mkey)!.get('u1')!) as {
-      j: number;
-    };
-    expect(meta.j).toBe(1000);
-    expect(resolveNameCalls).toBe(0);
-    // Probe + write: exactly two pipelined round-trips for the batch.
-    expect(fake.pipelineCalls - pipelinesBefore).toBe(2);
+    // A fresh token matches the bumped counter and the write goes through.
+    const freshToken = await cache.readVersionToken(CHALLENGE, DATE);
+    expect(freshToken).toEqual({ version: 1, generation: 0 });
+    await cache.set(
+      CHALLENGE,
+      DATE,
+      rows({ userId: 'u1', steps: 100 }),
+      freshToken,
+    );
+    expect(await fake.exists(zkey, mkey)).toBe(2);
   });
 
-  it('updateScores writes meta only when the field is missing, calling resolveName once', async () => {
+  it('conditional set aborts when the generation was bumped (roster change mid-hydration)', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    // A hydrated zset whose meta field is gone (partial write): the batch
-    // must repair the meta using resolveName, once for the whole payload.
-    fake.zsets.set(zkey, new Map([['u1', 100]]));
-    let resolveNameCalls = 0;
 
-    await cache.updateScores({
-      challengeId: CHALLENGE,
-      userId: 'u1',
-      joinedAtMs: 4242,
-      entries: [{ date: DATE, steps: 5000 }],
-      resolveName: async () => {
-        resolveNameCalls += 1;
-        return 'Fresh Name';
-      },
-    });
+    const staleToken = await cache.readVersionToken(CHALLENGE, DATE);
+    await cache.invalidateChallenge(CHALLENGE); // bumps lbgen only, no keys
 
-    expect(resolveNameCalls).toBe(1);
-    expect(JSON.parse(fake.hashes.get(mkey)!.get('u1')!)).toEqual({
-      j: 4242,
-      n: 'Fresh Name',
-    });
-    expect((await fake.zrevrange(zkey, 0, -1, 'WITHSCORES'))[1]).toBe('5000');
+    await cache.set(
+      CHALLENGE,
+      DATE,
+      rows({ userId: 'u1', steps: 100 }),
+      staleToken,
+    );
+    expect(await fake.exists(zkey, mkey)).toBe(0);
   });
 
-  it('updateScores updates every existing date in two round-trips (multi-date batch)', async () => {
+  it('a pipeline tuple error in readVersionToken warns and yields a never-matching token', async () => {
     const fake = new FakeRedis();
-    const cache = cacheWith(fake);
-    const secondDate = '2026-09-15';
-    const staleDate = '2026-09-14';
-    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
-    await cache.set(CHALLENGE, secondDate, rows({ userId: 'u1', steps: 200 }));
-    const pipelinesBefore = fake.pipelineCalls;
+    // Pipeline whose exec resolves with a per-command error tuple — ioredis
+    // does NOT reject on these, so only the explicit tuple inspection can
+    // catch them.
+    const broken = new Proxy(fake, {
+      get(target, prop) {
+        if (prop === 'pipeline') {
+          return () => ({
+            get() {
+              return this;
+            },
+            exec: async (): Promise<[Error | null, unknown][]> => [
+              [new Error('boom'), null],
+              [null, '0'],
+            ],
+          });
+        }
+        return Reflect.get(target, prop) as never;
+      },
+    }) as unknown as Redis;
+    const warnSpy = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    const cache = cacheWith(broken);
 
-    await cache.updateScores({
-      challengeId: CHALLENGE,
-      userId: 'u1',
-      joinedAtMs: 1000,
-      entries: [
-        { date: DATE, steps: 11_000 },
-        { date: secondDate, steps: 22_000 },
-        { date: staleDate, steps: 33_000 },
-      ],
-      resolveName: async () => 'User 1',
-    });
+    const token = await cache.readVersionToken(CHALLENGE, DATE);
 
-    expect((await fake.zrevrange(zkey, 0, -1, 'WITHSCORES'))[1]).toBe('11000');
-    expect(
-      (
-        await fake.zrevrange(
-          `lb:${CHALLENGE}:${secondDate}`,
-          0,
-          -1,
-          'WITHSCORES',
-        )
-      )[1],
-    ).toBe('22000');
-    // The never-hydrated date stays absent — the cold key is not created.
-    expect(await fake.exists(`lb:${CHALLENGE}:${staleDate}`)).toBe(0);
-    expect(await fake.exists(`lb:meta:${CHALLENGE}:${staleDate}`)).toBe(0);
-    // Two round-trips no matter how many dates are in the payload.
-    expect(fake.pipelineCalls - pipelinesBefore).toBe(2);
+    expect(token).toEqual({ version: -1, generation: -1 });
+    expect(warnSpy).toHaveBeenCalledOnce();
+
+    // A set with the poisoned token can never match real counters (INCR
+    // never goes negative): the op fails as a whole and nothing is written
+    // — no payload keys, no TTL re-armed over stale data.
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }), token);
+    expect(await fake.exists(zkey, mkey)).toBe(0);
+    expect(fake.ttls.has(zkey)).toBe(false);
+    warnSpy.mockRestore();
   });
 
   it('set with empty rows only deletes stale keys and creates nothing', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
-    await cache.set(CHALLENGE, DATE, []);
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }), TOKEN0);
+    await cache.set(CHALLENGE, DATE, [], TOKEN0);
     expect(await fake.exists(zkey, mkey)).toBe(0);
   });
 
-  it('invalidateChallenge removes every lb and lb:meta key for the challenge', async () => {
+  it('invalidateChallenge removes every lb and lb:meta key for the challenge and bumps versions', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
-    await cache.set(CHALLENGE, '2026-09-15', rows({ userId: 'u1', steps: 50 }));
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }), TOKEN0);
+    await cache.set(
+      CHALLENGE,
+      '2026-09-15',
+      rows({ userId: 'u1', steps: 50 }),
+      TOKEN0,
+    );
 
     await cache.invalidateChallenge(CHALLENGE);
 
@@ -460,15 +520,33 @@ describe('LeaderboardCache', () => {
     expect(await fake.exists('lb:7:2026-09-15', 'lb:meta:7:2026-09-15')).toBe(
       0,
     );
+    // Each date's version was bumped exactly once (zset+meta share the ver).
+    expect(await fake.get(vkey)).toBe('1');
+    expect(await fake.get('lb:ver:7:2026-09-15')).toBe('1');
+    // And the challenge generation moved, so in-flight hydrations abort.
+    expect(await fake.get(gkey)).toBe('1');
+  });
+
+  it('invalidateChallenge bumps the generation even when no keys are cached', async () => {
+    const fake = new FakeRedis();
+    const cache = cacheWith(fake);
+
+    await cache.invalidateChallenge(CHALLENGE);
+
+    // Zero matched keys, yet the generation must move: a hydration that
+    // read its token before a member joined would otherwise write a
+    // pre-join roster for a never-cached date.
+    expect(await fake.get(gkey)).toBe('1');
+    expect(await fake.exists(zkey, mkey)).toBe(0);
   });
 
   it('invalidateChallenge leaves sibling challenges and unrelated keys intact', async () => {
     const fake = new FakeRedis();
     const cache = cacheWith(fake);
-    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }));
+    await cache.set(CHALLENGE, DATE, rows({ userId: 'u1', steps: 100 }), TOKEN0);
     // Challenge 71 shares the 7 prefix — SCAN globs must NOT over-match it.
-    await cache.set(71, DATE, rows({ userId: 'u2', steps: 200 }));
-    await cache.set(99, DATE, rows({ userId: 'u3', steps: 300 }));
+    await cache.set(71, DATE, rows({ userId: 'u2', steps: 200 }), TOKEN0);
+    await cache.set(99, DATE, rows({ userId: 'u3', steps: 300 }), TOKEN0);
     fake.hashes.set('app:settings', new Map([['theme', 'dark']]));
 
     await cache.invalidateChallenge(CHALLENGE);
@@ -481,6 +559,9 @@ describe('LeaderboardCache', () => {
       2,
     );
     expect(fake.hashes.has('app:settings')).toBe(true);
+    // Sibling generations untouched.
+    expect(await fake.get('lbgen:71')).toBeNull();
+    expect(await fake.get('lbgen:99')).toBeNull();
   });
 
   it('invalidateChallenge swallows Redis errors (no throw)', async () => {

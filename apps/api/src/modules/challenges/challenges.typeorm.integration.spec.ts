@@ -599,7 +599,7 @@ describe.skipIf(!runIntegration)(
       });
     });
 
-    it('serves the leaderboard cache-aside from Redis, with write-through on sync (issue #13, PR-B)', async () => {
+    it('serves the leaderboard cache-aside from Redis, with invalidation on sync (issue #13, PR-B; PR #28)', async () => {
       // 1. Alice (owner) + Bob (member) register and set up a challenge.
       const aliceEmail = `integration-cache-alice-${runId}@example.com`;
       const alice = (await request(httpServer)
@@ -729,8 +729,10 @@ describe.skipIf(!runIntegration)(
         expect(aliceEntry).toMatchObject({ steps: 12000, rank: 1 });
         expect(rehydrated.body).toHaveLength(2);
 
-        // 6. Write-through: Bob syncs MORE steps with the cache key present
-        //    and NO eviction — the next GET reflects it immediately.
+        // 6. Invalidation-on-sync (PR #28): Bob syncs MORE steps with the
+        //    cache key present and NO manual eviction — the sync drops the
+        //    cached keys, so the next GET rehydrates from Postgres and
+        //    reflects the new steps immediately.
         await request(httpServer)
           .post(`/api/challenges/${challengeId}/steps`)
           .set('Authorization', `Bearer ${bobToken}`)
