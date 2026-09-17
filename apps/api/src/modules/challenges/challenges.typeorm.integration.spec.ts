@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
 import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
 import { config as loadDotEnv } from 'dotenv';
+import Redis from 'ioredis';
 import request from 'supertest';
 import { DataSource, Repository } from 'typeorm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -14,6 +15,7 @@ import { UserProfilePasswordHashNullable1788307500000 } from '../../migrations/1
 import { StepEntrySchema1788307600000 } from '../../migrations/1788307600000-StepEntrySchema';
 import { StepEntry } from '../steps/entities/step-entry.entity';
 import { ChallengesModule } from './challenges.module';
+import { DEFAULT_REDIS_URL } from './redis.provider';
 
 // supertest types every response body as `any`; these shadow types keep the
 // flow fully typed so the repo's no-unsafe-* lint rules stay green. The
@@ -78,6 +80,12 @@ describe.skipIf(!runIntegration)(
     let nestApp: INestApplication<import('http').Server>;
     let httpServer: import('http').Server;
     let originalDatabaseUrl: string | undefined;
+    // Test-owned Redis client for cache assertions (issue #13, PR-B). Created
+    // in beforeAll, gated on a successful ping: the leaderboard behavior
+    // assertions always run, but cache-specific probes are skipped when
+    // Redis is unreachable (resilience itself is unit-tested).
+    let testRedis: Redis | null = null;
+    let redisAvailable = false;
 
     // Unique per run so repeated executions never collide on emails.
     const runId = Date.now().toString(36);
@@ -141,6 +149,23 @@ describe.skipIf(!runIntegration)(
       );
       await nestApp.init();
       httpServer = nestApp.getHttpServer();
+
+      // Probe Redis once (REDIS_URL from .env, never printed). retryStrategy
+      // null so an unreachable Redis fails fast instead of retrying.
+      const probe = new Redis(process.env.REDIS_URL ?? DEFAULT_REDIS_URL, {
+        lazyConnect: true,
+        connectTimeout: 1000,
+        maxRetriesPerRequest: 1,
+        retryStrategy: () => null,
+      });
+      try {
+        await probe.connect();
+        redisAvailable = (await probe.ping()) === 'PONG';
+        if (redisAvailable) testRedis = probe;
+      } catch {
+        redisAvailable = false;
+        probe.disconnect();
+      }
     });
 
     afterAll(async () => {
@@ -161,6 +186,11 @@ describe.skipIf(!runIntegration)(
           await nestApp?.close();
         } catch {
           // Nothing was initialised — closing is a no-op.
+        }
+        try {
+          await testRedis?.quit();
+        } catch {
+          testRedis?.disconnect();
         }
         if (originalDatabaseUrl === undefined) {
           delete process.env.DATABASE_URL;
@@ -567,6 +597,164 @@ describe.skipIf(!runIntegration)(
         rank: 2,
         isRequester: true,
       });
+    });
+
+    it('serves the leaderboard cache-aside from Redis, with invalidation on sync (issue #13, PR-B; PR #28)', async () => {
+      // 1. Alice (owner) + Bob (member) register and set up a challenge.
+      const aliceEmail = `integration-cache-alice-${runId}@example.com`;
+      const alice = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({
+          name: 'Integration Cache Alice',
+          email: aliceEmail,
+          password,
+        })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const aliceToken = alice.body.token;
+
+      const bobEmail = `integration-cache-bob-${runId}@example.com`;
+      const bob = (await request(httpServer)
+        .post('/api/auth/register')
+        .send({ name: 'Integration Cache Bob', email: bobEmail, password })
+        .expect(201)) as unknown as SuperResponse<RegisterResponseBody>;
+      const bobToken = bob.body.token;
+
+      const created = (await request(httpServer)
+        .post('/api/challenges')
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({
+          name: `Integration Cache Challenge ${runId}`,
+          type: 'step',
+          startDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          endDate: new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString(),
+        })
+        .expect(201)) as unknown as SuperResponse<ChallengeResponseBody>;
+      const challengeId = created.body.challenge.id;
+      const aliceDomainId = Number(created.body.challenge.createdBy);
+
+      const invite = (await request(httpServer)
+        .post(`/api/challenges/${challengeId}/invites`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ inviteeEmail: bobEmail })
+        .expect(201)) as unknown as SuperResponse<InviteResponseBody>;
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/join`)
+        .set('Authorization', `Bearer ${bobToken}`)
+        .send({ inviteToken: invite.body.invite.token })
+        .expect(200);
+
+      // 2. Both sync steps for the same date — Bob ahead of Alice. The date is
+      //    derived from the run (the same YYYY-MM-DD derivation the service
+      //    uses for its default day) so the probe never goes stale as real
+      //    time moves past a hardcoded literal.
+      const syncDate = new Date().toISOString().slice(0, 10);
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${aliceToken}`)
+        .send({ entries: [{ date: syncDate, steps: 4000 }] })
+        .expect(200);
+      await request(httpServer)
+        .post(`/api/challenges/${challengeId}/steps`)
+        .set('Authorization', `Bearer ${bobToken}`)
+        .send({ entries: [{ date: syncDate, steps: 9000 }] })
+        .expect(200);
+
+      const zkey = `lb:${challengeId}:${syncDate}`;
+      const mkey = `lb:meta:${challengeId}:${syncDate}`;
+
+      const getLeaderboard = () =>
+        request(httpServer)
+          .get(`/api/challenges/${challengeId}/leaderboard?date=${syncDate}`)
+          .set('Authorization', `Bearer ${aliceToken}`)
+          .expect(200) as unknown as Promise<
+          SuperResponse<LeaderboardEntryBody[]>
+        >;
+
+      // 3. First GET: cache miss → DB query → hydration. Second GET must be
+      //    served from the freshly written Redis keys.
+      const first = await getLeaderboard();
+      expect(first.body[0]).toMatchObject({
+        name: 'Integration Cache Bob',
+        steps: 9000,
+        rank: 1,
+      });
+      const second = await getLeaderboard();
+      expect(second.body).toEqual(first.body);
+
+      if (redisAvailable && testRedis) {
+        // Hydration wrote both keys with the exact naming + 48h TTL.
+        expect(await testRedis.exists(zkey)).toBe(1);
+        expect(await testRedis.exists(mkey)).toBe(1);
+        const ttl = await testRedis.ttl(zkey);
+        expect(ttl).toBeGreaterThan(0);
+        expect(ttl).toBeLessThanOrEqual(172800);
+      }
+
+      // 4. Mutate the DB behind the cache's back. With Redis reachable, the
+      //    next GET must still return the CACHED value (proves the second
+      //    read was a cache hit). The stale-read probe is gated on Redis for
+      //    the same reason every other cache probe is: when Redis is down
+      //    the app correctly falls through to the DB on every GET, so the
+      //    probe would fail by design — the step-5 rehydration probe already
+      //    proves the DB stays the source of truth when it runs.
+      const stepEntries = moduleRef.get<Repository<StepEntry>>(
+        getRepositoryToken(StepEntry),
+      );
+      await stepEntries.update(
+        {
+          userId: aliceDomainId,
+          challengeId: Number(challengeId),
+          date: syncDate,
+        },
+        { steps: 12000 },
+      );
+      if (redisAvailable && testRedis) {
+        const cachedRead = await getLeaderboard();
+        expect(
+          cachedRead.body.find(
+            (entry) => entry.name === 'Integration Cache Alice',
+          ),
+        ).toMatchObject({ steps: 4000, rank: 2 });
+      }
+
+      if (redisAvailable && testRedis) {
+        // 5. Evict the keys: the next GET rehydrates from the DB (Alice's
+        //    direct write now visible) — proving the DB stays the source of
+        //    truth after a cache invalidation.
+        await testRedis.del(zkey, mkey);
+        const rehydrated = await getLeaderboard();
+        const aliceEntry = rehydrated.body.find(
+          (entry) => entry.name === 'Integration Cache Alice',
+        );
+        expect(aliceEntry).toMatchObject({ steps: 12000, rank: 1 });
+        expect(rehydrated.body).toHaveLength(2);
+
+        // 6. Invalidation-on-sync (PR #28): Bob syncs MORE steps with the
+        //    cache key present and NO manual eviction — the sync drops the
+        //    cached keys, so the next GET rehydrates from Postgres and
+        //    reflects the new steps immediately.
+        await request(httpServer)
+          .post(`/api/challenges/${challengeId}/steps`)
+          .set('Authorization', `Bearer ${bobToken}`)
+          .send({ entries: [{ date: syncDate, steps: 20000 }] })
+          .expect(200);
+        const afterWriteThrough = await getLeaderboard();
+        expect(afterWriteThrough.body[0]).toMatchObject({
+          name: 'Integration Cache Bob',
+          steps: 20000,
+          rank: 1,
+        });
+        expect(afterWriteThrough.body[1]).toMatchObject({
+          name: 'Integration Cache Alice',
+          steps: 12000,
+          rank: 2,
+        });
+
+        // Cleanup: don't leave leaderboard keys behind in the dev Redis.
+        await testRedis.del(zkey, mkey);
+      }
+      // Redis-down resilience (endpoint still 200 from DB) is covered by the
+      // LeaderboardCache unit spec — the container is intentionally untouched.
     });
   },
 );

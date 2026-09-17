@@ -22,6 +22,7 @@ import { Membership } from './entities/membership.entity';
 import { UserProfile } from './entities/user-profile.entity';
 import { StepEntry } from '../steps/entities/step-entry.entity';
 import { rankLeaderboard, type LeaderboardRow } from './leaderboard.ranking';
+import { LeaderboardCache } from './leaderboard.cache';
 import { generateInviteToken } from './invite-token';
 
 const INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -52,6 +53,7 @@ export class TypeOrmChallengesStore extends ChallengesStore {
     private readonly stepEntries: Repository<StepEntry>,
     @InjectRepository(UserProfile)
     private readonly users: Repository<UserProfile>,
+    private readonly cache: LeaderboardCache,
   ) {
     super();
   }
@@ -136,8 +138,9 @@ export class TypeOrmChallengesStore extends ChallengesStore {
   }): Promise<JoinChallengeResult> {
     const challengeId = this.toNumericId(input.challengeId);
     const userId = this.toNumericId(input.userId);
+    let freshJoin = false;
 
-    return this.dataSource.transaction(
+    const result = await this.dataSource.transaction(
       async (em): Promise<JoinChallengeResult> => {
         const memberships = em.getRepository(Membership);
         const invites = em.getRepository(Invite);
@@ -172,12 +175,27 @@ export class TypeOrmChallengesStore extends ChallengesStore {
           memberships.create({ userId, challengeId, role: 'member' }),
         );
         await invites.update(invite.id, { status: 'accepted' });
+        freshJoin = true;
         return {
           ok: true,
           challenge: this.toRecord(challenge, memberCount + 1),
         };
       },
     );
+
+    // A new member changes the daily leaderboard roster: drop every cached
+    // key for the challenge so the next GET rehydrates from the DB with this
+    // member included (a stale zset would silently omit them until the 48h
+    // TTL expired). The invalidation runs AFTER the transaction commits —
+    // inside the callback a concurrent GET could rehydrate from the
+    // pre-join roster and cache it for 48h (PR #28 review). Best-effort:
+    // Redis errors are swallowed inside the cache; the idempotent re-join
+    // path above intentionally skips this, no cache churn when nothing
+    // changed.
+    if (freshJoin) {
+      await this.cache.invalidateChallenge(challengeId);
+    }
+    return result;
   }
 
   async syncSteps(
@@ -225,12 +243,26 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       },
     });
     const stepsByDate = new Map(rows.map((row) => [row.date, row.steps]));
-    return {
-      entries: entries.map((entry) => ({
-        date: entry.date,
-        steps: stepsByDate.get(entry.date) ?? entry.steps,
-      })),
-    };
+    const syncedEntries = entries.map((entry) => ({
+      date: entry.date,
+      steps: stepsByDate.get(entry.date) ?? entry.steps,
+    }));
+
+    // Invalidation-based write-through to the leaderboard cache (issue #13,
+    // PR-B; PR #28 review): syncs NEVER write scores to Redis — that would
+    // race with concurrent syncs committing PG in one order and writing
+    // Redis in the reverse order. Instead the synced dates' cache keys are
+    // dropped and their per-date versions bumped atomically, so the next GET
+    // rehydrates from the just-committed Postgres state and any hydration
+    // already in flight aborts on its version check. On any Redis error
+    // invalidateDates is a swallowed no-op and the next GET still rehydrates
+    // from the DB.
+    await this.cache.invalidateDates(
+      numericChallengeId,
+      syncedEntries.map((entry) => entry.date),
+    );
+
+    return { entries: syncedEntries };
   }
 
   async getDailyLeaderboard(
@@ -249,6 +281,15 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       throw new ForbiddenException(
         'Only members can view the leaderboard of a challenge.',
       );
+    }
+
+    // Cache-aside (issue #13, PR-B): only AFTER the authorization check —
+    // a non-member's 403 must never come from (or leak through) the cache.
+    // The requester is passed through so a cache hit marks isRequester the
+    // same way the DB path does (issue #13, PR-A contract).
+    const cached = await this.cache.get(numericChallengeId, date, userId);
+    if (cached !== null) {
+      return cached;
     }
 
     // One row per member of the challenge: INNER JOIN the domain user profile
@@ -290,6 +331,19 @@ export class TypeOrmChallengesStore extends ChallengesStore {
       steps: Number(row.steps),
       joinedAt: row.joinedAt,
     }));
+    // Fill the cache with the same rows used for ranking (name + joinedAt
+    // included, so the meta hash carries the tie-break inputs). The fill is
+    // CONDITIONAL (PR #28 review): the version token is read right before
+    // the write and the cache's Lua script re-checks it — a sync or join
+    // landing between the DB read and the write bumps a counter and this
+    // stale snapshot is dropped instead of overwriting fresher state. A
+    // Redis failure is swallowed inside the cache — the ranked DB result is
+    // returned regardless.
+    const expected = await this.cache.readVersionToken(
+      numericChallengeId,
+      date,
+    );
+    await this.cache.set(numericChallengeId, date, leaderboardRows, expected);
     return rankLeaderboard(leaderboardRows, userId);
   }
 

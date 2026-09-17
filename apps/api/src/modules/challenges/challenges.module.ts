@@ -7,6 +7,8 @@ import { ChallengesService } from './challenges.service';
 import { ChallengesStore } from './challenges.store';
 import { TypeOrmChallengesStore } from './challenges.typeorm.store';
 import { DomainUserMapper } from './domain-user.mapper';
+import { LeaderboardCache } from './leaderboard.cache';
+import { redisProvider } from './redis.provider';
 import { StepsController } from './steps.controller';
 import { Challenge } from './entities/challenge.entity';
 import { Invite } from './entities/invite.entity';
@@ -72,6 +74,12 @@ export class ChallengesModule {
         // Reconciler between better-auth sessions (string ids) and the
         // numeric domain `user` table (find-or-create by unique email).
         DomainUserMapper,
+        // Redis cache-aside for the daily leaderboard (issue #13, PR-B).
+        // TypeORM flavour only — the memory store computes directly and its
+        // tests bootstrap without Redis. lazyConnect: bootstrap never blocks
+        // on an unreachable Redis and the cache degrades to the DB.
+        redisProvider,
+        LeaderboardCache,
       ],
     };
   }
